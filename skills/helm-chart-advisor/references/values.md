@@ -76,6 +76,68 @@ serverPort: 9191
 
 ---
 
+# values.yaml のベーステンプレート
+
+チャート新規作成時、以下の構造を values.yaml のベースとして使う。セキュリティ設定やリソース制限を含め、ベストプラクティスに沿ったデフォルト値を提供する。
+
+```yaml
+# replicaCount はデプロイメントのレプリカ数
+replicaCount: 1
+
+# image はコンテナイメージの設定
+image:
+  # image.repository はコンテナイメージのリポジトリ
+  repository: nginx
+  # image.tag はコンテナイメージのタグ（未指定時は Chart.yaml の appVersion を使用）
+  tag: ""
+  # image.pullPolicy はイメージの取得ポリシー
+  pullPolicy: IfNotPresent
+
+# resources はCPU/メモリのリクエストとリミット
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# podSecurityContext はPodレベルのセキュリティコンテキスト
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# containerSecurityContext はコンテナレベルのセキュリティコンテキスト
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+
+# serviceAccount はServiceAccountの設定
+serviceAccount:
+  # serviceAccount.create はServiceAccountを作成するかどうか
+  create: true
+  # serviceAccount.name はServiceAccountの名前（空の場合は自動生成）
+  name: ""
+  # serviceAccount.automountToken はAPIトークンを自動マウントするかどうか
+  automountToken: false
+
+# networkPolicy はNetworkPolicyの設定
+networkPolicy:
+  # networkPolicy.enabled はNetworkPolicyを作成するかどうか
+  enabled: false
+```
+
+---
+
 # values.schema.json によるバリデーション
 
 ## JSON Schema の配置と自動検証

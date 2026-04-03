@@ -45,3 +45,13 @@ Helm chart の作成・編集・レビューを、組織のベストプラクテ
 | `workloads.md` | コンテナイメージ、リソース、プローブ、ラベル |
 | `operations.md` | helm upgrade/install フラグ、CI/CD、テスト、シークレット |
 | `ecosystem.md` | OCI レジストリ、Helmfile、ArgoCD、ドキュメント、Helm 4 |
+
+## 出力テンプレート
+
+`assets/` 配下にプラン・レビュー結果の出力テンプレートを格納している。各モードの手順で出力ファイルを作成する際に参照する。
+
+| ファイル | 用途 |
+|---|---|
+| `create-plan-template.md` | 新規作成プランの出力テンプレート |
+| `edit-plan-template.md` | 編集プランの出力テンプレート |
+| `review-result-template.md` | レビュー結果の出力テンプレート |

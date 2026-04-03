@@ -31,7 +31,7 @@
 
 1. **ヒアリング**: 上記のヒアリング項目に基づき、不足情報を確認する
 2. **構成確認**: 上記の構成確認に基づき、全項目の挙動説明・不整合チェックを行い、ユーザーの OK を得る
-3. **プラン出力**: 確認済みの構成内容を `result/helm-chart-advisor-create-plan-{yyyyMMddHHmm}.md` に保存する。ファイルには構成一覧（挙動説明付き）、不整合チェック結果、ユーザーとの合意事項を含める
+3. **プラン出力**: 確認済みの構成内容を `result/helm-chart-advisor-create-plan-{yyyyMMddHHmm}.md` に保存する。`assets/create-plan-template.md` のテンプレートに従うこと
 4. **プランに基づいて作成**: 手順3で出力したプランファイルをインプットとして、以降の作業を行う。`helm create <chart-name>` のスキャフォールドをベースにする
 5. 以下の必須ファイルを整備する:
    - `Chart.yaml` — SemVer 2 バージョニング（詳細: `chart-structure.md`）
@@ -43,87 +43,11 @@
 6. セキュリティデフォルトを組み込む（詳細: `security.md`）
 7. `helm lint` で検証する
 
-## values.yaml のテンプレートパターン
-
-チャート作成時、以下の構造を values.yaml のベースとして使う:
-
-```yaml
-# replicaCount はデプロイメントのレプリカ数
-replicaCount: 1
-
-# image はコンテナイメージの設定
-image:
-  # image.repository はコンテナイメージのリポジトリ
-  repository: nginx
-  # image.tag はコンテナイメージのタグ（未指定時は Chart.yaml の appVersion を使用）
-  tag: ""
-  # image.pullPolicy はイメージの取得ポリシー
-  pullPolicy: IfNotPresent
-
-# resources はCPU/メモリのリクエストとリミット
-resources:
-  requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
-    cpu: 500m
-    memory: 256Mi
-
-# podSecurityContext はPodレベルのセキュリティコンテキスト
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
-  seccompProfile:
-    type: RuntimeDefault
-
-# containerSecurityContext はコンテナレベルのセキュリティコンテキスト
-containerSecurityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  runAsUser: 1000
-  capabilities:
-    drop:
-      - ALL
-
-# serviceAccount はServiceAccountの設定
-serviceAccount:
-  # serviceAccount.create はServiceAccountを作成するかどうか
-  create: true
-  # serviceAccount.name はServiceAccountの名前（空の場合は自動生成）
-  name: ""
-  # serviceAccount.automountToken はAPIトークンを自動マウントするかどうか
-  automountToken: false
-
-# networkPolicy はNetworkPolicyの設定
-networkPolicy:
-  # networkPolicy.enabled はNetworkPolicyを作成するかどうか
-  enabled: false
-```
-
-## セキュリティコンテキストのテンプレート例
-
-deployment.yaml での展開パターン:
-
-```yaml
-spec:
-  template:
-    spec:
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      containers:
-        - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
-```
-
 ## 関連リファレンス
 
 新規作成時に確認すべきリファレンス:
 - `chart-structure.md` — 命名規則、バージョニング
-- `values.md` — values 設計、スキーマ
+- `values.md` — values 設計、スキーマ、ベーステンプレート
 - `templates.md` — テンプレート構造
-- `security.md` — セキュリティ設定
+- `security.md` — セキュリティ設定、テンプレート展開パターン
 - `workloads.md` — イメージ、リソース、プローブ、ラベル

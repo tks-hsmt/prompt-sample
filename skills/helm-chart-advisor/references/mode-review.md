@@ -24,87 +24,22 @@ Helm chart をレビューする場合の手順。
    - 「`namespace: production` がハードコードされているため、他の namespace にデプロイできません」
    - 「`resources` が未設定のため、このPodがノードのCPU/メモリを使い切り、他のPodに影響する可能性があります」
    - 「`latest` タグを使用しているため、デプロイのたびに異なるバージョンのイメージが取得される可能性があります」
-7. **レビュー結果出力**: レビュー結果を `result/helm-chart-advisor-review-{yyyyMMddHHmm}.md` に保存する。ファイルには指摘事項（必須/推奨分類付き）、挙動の説明、修正例、サマリーを含める
+7. **レビュー結果出力**: レビュー結果を `result/helm-chart-advisor-review-{yyyyMMddHHmm}.md` に保存する。`assets/review-result-template.md` のテンプレートに従うこと
 8. **修正への誘導**: レビュー結果の保存後、ユーザーに「このレビュー結果をもとに修正を行いますか？」と確認する。ユーザーが希望する場合は、editモードに切り替え、レビュー結果ファイルを変更仕様として使用する
 
-## 必須チェックリスト
+## チェック対象リファレンスとチェック観点
 
-以下は必ず満たすべき項目。レビュー時はこれらを優先的に確認する。
+以下のリファレンスに記載されたルールに基づいてレビューを行う。「チェック観点」列に示した問いに答える形でチェックする。ルールの詳細は各リファレンスを参照すること（ルール自体をここに再掲しない）。
 
-### 構造・命名
-- チャート名: 小文字英字+数字+ハイフンのみ、英字始まり
-- `Chart.yaml` の `version`: SemVer 2 (MAJOR.MINOR.PATCH)
-- YAML: 2スペースインデント、タブ禁止
-
-### values.yaml
-- 変数名: camelCase（小文字始まり）
-- 文字列はすべてクォートする（型の明示）
-- 各パラメータにパラメータ名で始まるコメント
-- 環境別 values ファイル分離（values-dev.yaml, values-production.yaml 等）
-- 追加フラグなしで `helm install` できる合理的なデフォルト値
-
-### テンプレート
-- 1リソース1ファイル、ファイル名に kind を反映（例: `foo-deployment.yaml`）
-- 定義テンプレートはチャート名でプレフィックス（例: `{{ define "myapp.fullname" }}`）
-- テンプレート内で `namespace` をハードコードしない
-- テンプレートディレクティブのブレース前後にスペース（`{{ .foo }}` not `{{.foo}}`）
-
-### コンテナイメージ
-- `latest` 等のフローティングタグ禁止、固定タグまたは SHA ダイジェスト
-- `image.repository` / `image.tag` / `image.pullPolicy` を values で分離
-
-### セキュリティ（securityContext）
-- `runAsNonRoot: true`
-- `runAsUser` / `runAsGroup` / `fsGroup` の明示指定
-- `allowPrivilegeEscalation: false`
-- `capabilities.drop: ["ALL"]`
-- Pod/Container の securityContext を values でオーバーライド可能にする
-
-### リソース・ヘルスチェック
-- すべてのコンテナに `resources.requests` / `resources.limits` を設定
-- `livenessProbe` と `readinessProbe` を定義
-
-### ラベル
-- `app.kubernetes.io/*` 推奨ラベルを使用
-- `selector.matchLabels` には不変ラベルのみ（`name` と `instance`）
-
-### 依存関係
-- オプショナル依存には `condition` または `tags` を設定
-
-### 運用
-- デプロイには `helm upgrade --install` を使用
-- 本番では `--atomic` フラグ必須
-
-## 推奨チェックリスト
-
-必須ではないが、品質向上のために推奨する項目。
-
-- `values.schema.json` による入力バリデーション
-- フラット構造の values を優先（ネストは関連変数が多い場合のみ）
-- `--set` フレンドリーな設計（配列よりマップ）
-- `readOnlyRootFilesystem: true`（書き込み先は emptyDir でマウント）
-- `seccompProfile.type: RuntimeDefault`
-- `automountServiceAccountToken: false`（API 不要時）
-- NetworkPolicy テンプレートの組み込み
-- `startupProbe`（起動の遅いアプリ）
-- 依存チャートのバージョン範囲指定（`~1.2.3`）
-- `--timeout`, `--history-max`, `--description` の設定
-- CI パイプラインで lint -> template -> dry-run の段階的検証
-- helm-docs による README 自動生成
-- OCI レジストリでのチャート配布
-- Helmfile（10以上のリリース管理時）
-
-## 詳細リファレンス
-
-指摘事項の根拠や具体的な設定パターンを確認したい場合:
-
-| トピック | 参照ファイル |
+| 参照ファイル | チェック観点（何を確認するか） |
 |---|---|
-| 命名規則、バージョニング | `chart-structure.md` |
-| values 設計、スキーマ | `values.md` |
-| テンプレート構造 | `templates.md` |
-| 依存関係、CRD | `dependencies.md` |
-| セキュリティ全般 | `security.md` |
-| イメージ、リソース、プローブ、ラベル | `workloads.md` |
-| 運用、CI/CD、テスト | `operations.md` |
-| OCI、Helmfile、ArgoCD、ドキュメント | `ecosystem.md` |
+| `chart-structure.md` | チャート名は命名規則に準拠しているか。version は SemVer 2 か。ディレクトリ名とチャート名は一致しているか |
+| `values.md` | 変数名は camelCase か。文字列はクォートされているか。各パラメータにコメントがあるか。デフォルト値だけで install できるか。values.schema.json はあるか |
+| `templates.md` | 1リソース1ファイルか。ファイル名に kind が反映されているか。定義テンプレートはチャート名でプレフィックスされているか。namespace がハードコードされていないか。ブレース前後にスペースがあるか |
+| `dependencies.md` | オプショナル依存に condition/tags があるか。バージョンは範囲指定か。CRD は crds/ または別チャートで管理されているか |
+| `security.md` | securityContext（runAsNonRoot, allowPrivilegeEscalation, capabilities.drop 等）は設定されているか。values でオーバーライド可能か。ServiceAccount は専用で作成されているか。automountToken は無効か |
+| `workloads.md` | イメージタグは固定か（latest 禁止）。image.repository/tag/pullPolicy は values で分離されているか。resources の requests/limits は設定されているか。liveness/readiness probe は定義されているか。推奨ラベルを使用しているか。selector に不変ラベルのみ使用しているか |
+| `operations.md` | デプロイコマンドは helm upgrade --install を使用しているか。本番で --atomic は使用されているか。CI パイプラインに lint/template/dry-run の段階的検証があるか。シークレットは適切に管理されているか |
+| `ecosystem.md` | OCI レジストリを使用しているか。ドキュメント（helm-docs, NOTES.txt）はあるか。Helm 4 への対応状況はどうか |
+
+レビュースコープに応じて、関連するリファレンスだけを読み込む。全項目チェックの場合は上記すべてを対象にする。
