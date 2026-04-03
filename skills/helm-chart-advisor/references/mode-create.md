@@ -87,16 +87,19 @@
 
 ## 手順
 
-1. `helm create <chart-name>` のスキャフォールドをベースにする
-2. 以下の必須ファイルを整備する:
+1. **ヒアリング**: 上記のヒアリング項目に基づき、不足情報を確認する
+2. **構成確認**: 上記の構成確認に基づき、全項目の挙動説明・不整合チェックを行い、ユーザーの OK を得る
+3. **プラン出力**: 確認済みの構成内容を `result/helm-chart-advisor-create-plan-{yyyyMMddHHmm}.md` に保存する。ファイルには構成一覧（挙動説明付き）、不整合チェック結果、ユーザーとの合意事項を含める
+4. **プランに基づいて作成**: 手順3で出力したプランファイルをインプットとして、以降の作業を行う。`helm create <chart-name>` のスキャフォールドをベースにする
+5. 以下の必須ファイルを整備する:
    - `Chart.yaml` — SemVer 2 バージョニング（詳細: `chart-structure.md`）
    - `values.yaml` — 合理的なデフォルト値、camelCase 命名、パラメータ名で始まるコメント（詳細: `values.md`）
    - `values.schema.json` — 入力バリデーション（詳細: `values.md`）
    - テンプレート群 — 1リソース1ファイル、kind を反映したファイル名（詳細: `templates.md`）
    - `templates/_helpers.tpl` — チャート名でプレフィックスした定義テンプレート
    - `templates/NOTES.txt` — インストール後の手順
-3. セキュリティデフォルトを組み込む（詳細: `security.md`）
-4. `helm lint` で検証する
+6. セキュリティデフォルトを組み込む（詳細: `security.md`）
+7. `helm lint` で検証する
 
 ## values.yaml のテンプレートパターン
 
