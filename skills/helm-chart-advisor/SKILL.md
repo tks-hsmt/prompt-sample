@@ -5,6 +5,16 @@ description: |
   ユーザーが Helm chart を新規作成したい、既存の Helm chart を修正したい、Helm chart のレビューやセキュリティチェックをしたい、
   values.yaml の設計やテンプレートの構造について相談したい、といった場合に使用する。
   Kubernetes デプロイ、Helm、k8s マニフェスト、Chart.yaml、values.yaml、helm install/upgrade に関する作業全般でトリガーすること。
+allowed-tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash(helm lint*)
+  - Bash(helm template*)
+  - Bash(helm create*)
+  - Bash(helm install --dry-run*)
+  - Bash(helm dependency*)
+  - Bash(helm show*)
 ---
 
 # Helm Chart Advisor スキル
