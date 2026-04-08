@@ -1,0 +1,21 @@
+# =============================================================================
+# 開発環境オーバーライド
+# =============================================================================
+
+image:
+  # CI/CD でビルド後に --set image.digest=sha256:<digest> で設定する
+  digest: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+networkPolicy:
+  enabled: false
+
+# -- 開発クラスタのノード用 tolerations（開発クラスタに合わせて調整）
+tolerations: []

@@ -1,0 +1,31 @@
+# =============================================================================
+# 開発環境オーバーライド
+# =============================================================================
+
+replicaCount: 1
+
+image:
+  # CI/CD でビルド後に --set image.digest=sha256:<digest> で設定する
+  digest: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+autoscaling:
+  enabled: false
+
+networkPolicy:
+  enabled: false
+
+# -- 開発環境用のログレベル上書き（アプリが extraEnv 経由で対応している場合）
+# extraEnv:
+#   - name: LOG_LEVEL
+#     value: debug

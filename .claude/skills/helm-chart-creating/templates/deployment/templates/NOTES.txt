@@ -1,0 +1,9 @@
+1. 以下のコマンドでアプリケーション URL を取得してください:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}
+{{- end }}
+{{- else }}
+  kubectl port-forward svc/{{ include "CHARTNAME.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  その後 http://localhost:{{ .Values.service.port }} にアクセスしてください
+{{- end }}

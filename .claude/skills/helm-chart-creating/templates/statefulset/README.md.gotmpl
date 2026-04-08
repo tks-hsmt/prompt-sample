@@ -1,0 +1,38 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.deprecationWarning" . }}
+
+{{ template "chart.badgesSection" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+## インストール
+
+```bash
+helm upgrade --install my-release ./CHARTNAME \
+  --namespace production \
+  --create-namespace \
+  -f values-prod.yaml \
+  --atomic \
+  --timeout 10m
+```
+
+## 環境別 values
+
+| 環境 | ファイル | 説明 |
+|---|---|---|
+| 開発 | `values-dev.yaml` | 低リソース、デバッグログ |
+| ステージング | `values-stg.yaml` | 本番に近い構成で低スケール |
+| 本番 | `values-prod.yaml` | フルスケール、厳格な設定 |
+
+デプロイ時: `helm upgrade --install -f values.yaml -f values-<env>.yaml`
+
+{{ template "chart.valuesSection" . }}

@@ -1,0 +1,20 @@
+# =============================================================================
+# 本番環境オーバーライド
+# =============================================================================
+
+image:
+  # CI/CD でビルド後に --set image.digest=sha256:<digest> で設定する
+  digest: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+networkPolicy:
+  enabled: true
+
+activeDeadlineSeconds: 3600

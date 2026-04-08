@@ -1,0 +1,13 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "CHARTNAME.fullname" . }}
+  labels:
+    {{- include "CHARTNAME.labels" . | nindent 4 }}
+rules: []
+  # アプリケーションに必要な最小限の権限を追加する
+  # - apiGroups: [""]
+  #   resources: ["configmaps"]
+  #   verbs: ["get", "list", "watch"]
+{{- end }}

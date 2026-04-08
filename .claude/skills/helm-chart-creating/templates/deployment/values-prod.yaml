@@ -1,0 +1,56 @@
+# =============================================================================
+# 本番環境オーバーライド
+# =============================================================================
+
+replicaCount: 3
+
+image:
+  # CI/CD でビルド後に --set image.digest=sha256:<digest> で設定する
+  digest: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: app-tls
+    #   hosts:
+    #     - app.example.com
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: {}  # テンプレートの selectorLabels により設定される
+
+# extraEnv:
+#   - name: LOG_LEVEL
+#     value: warn

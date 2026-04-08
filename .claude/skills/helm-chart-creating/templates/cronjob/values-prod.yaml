@@ -1,0 +1,24 @@
+# =============================================================================
+# 本番環境オーバーライド
+# =============================================================================
+
+schedule: "0 2 * * *"
+timeZone: "Asia/Tokyo"
+
+image:
+  # CI/CD でビルド後に --set image.digest=sha256:<digest> で設定する
+  digest: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+networkPolicy:
+  enabled: true
+
+concurrencyPolicy: Forbid
+activeDeadlineSeconds: 3600

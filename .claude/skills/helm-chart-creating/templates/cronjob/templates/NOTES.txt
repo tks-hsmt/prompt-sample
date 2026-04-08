@@ -1,0 +1,11 @@
+CronJob {{ include "CHARTNAME.fullname" . }} が作成されました。
+スケジュール: {{ .Values.schedule }}
+{{- with .Values.timeZone }}
+タイムゾーン: {{ . }}
+{{- end }}
+
+1. CronJob の状態を確認:
+  kubectl get cronjob {{ include "CHARTNAME.fullname" . }} -n {{ .Release.Namespace }}
+
+2. 直近の Job を確認:
+  kubectl get jobs -l "app.kubernetes.io/instance={{ .Release.Name }}" -n {{ .Release.Namespace }}
