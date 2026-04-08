@@ -1,7 +1,0 @@
-Job {{ include "CHARTNAME.fullname" . }} が作成されました。
-
-1. Job の状態を確認:
-  kubectl get job {{ include "CHARTNAME.fullname" . }} -n {{ .Release.Namespace }}
-
-2. ログを確認:
-  kubectl logs job/{{ include "CHARTNAME.fullname" . }} -n {{ .Release.Namespace }}

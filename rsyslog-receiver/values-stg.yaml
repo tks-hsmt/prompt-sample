@@ -1,0 +1,20 @@
+# values-stg.yaml - ステージング環境オーバーライド
+replicaCount: 1
+
+image:
+  repository: "docker.io/rsyslog/syslog_appliance_alpine"
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+service:
+  type: LoadBalancer
+  port: 514
+  containerPort: 1514
+  portName: "syslog-udp"
+  protocol: UDP

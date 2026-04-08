@@ -1,5 +1,0 @@
-1. アプリケーションにアクセス:
-  kubectl port-forward svc/{{ include "CHARTNAME.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
-
-2. Headless Service 経由で個別 Pod にアクセス:
-  {{ include "CHARTNAME.fullname" . }}-0.{{ include "CHARTNAME.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local

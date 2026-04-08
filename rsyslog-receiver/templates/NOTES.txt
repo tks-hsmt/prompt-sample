@@ -1,0 +1,25 @@
+{{- $name := include "rsyslog-receiver.fullname" . -}}
+Release "{{ .Release.Name }}" of chart "{{ .Chart.Name }}" has been deployed to namespace "{{ .Release.Namespace }}".
+
+1. Pod の状態を確認:
+   kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} -n {{ .Release.Namespace }}
+
+2. アプリケーションログを確認:
+   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }} -n {{ .Release.Namespace }} --tail=100
+
+3. syslog の送信テスト (RFC5424 形式):
+   kubectl run syslog-test --rm -it --image=busybox --restart=Never -- \
+     sh -c 'echo "<165>1 2026-01-01T00:00:00Z host app - - - Test message" | nc -u {{ $name }}.{{ .Release.Namespace }}.svc.cluster.local {{ .Values.service.port }}'
+
+4. Service のアクセス情報:
+{{- if eq .Values.service.type "LoadBalancer" }}
+   外部 IP の取得 (プロビジョニングに数分かかる場合があります):
+   kubectl get svc {{ $name }} -n {{ .Release.Namespace }} -w
+{{- else if eq .Values.service.type "NodePort" }}
+   kubectl get svc {{ $name }} -n {{ .Release.Namespace }} -o jsonpath='{.spec.ports[0].nodePort}'
+{{- else }}
+   クラスタ内からのアクセス:
+   {{ $name }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+{{- end }}
+
+5. 転送先 fluentd: {{ .Values.forwarder.target }}:{{ .Values.forwarder.port }}

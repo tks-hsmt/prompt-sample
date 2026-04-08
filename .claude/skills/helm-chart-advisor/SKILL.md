@@ -1,0 +1,197 @@
+---
+name: helm-chart-advisor
+description: |
+  Helm chart の作成・修正・レビューを、組織ルールとベストプラクティスに基づいて行うスキル。
+  ユーザーが Helm chart を新規作成したい、既存の Helm chart を修正したい、Helm chart のレビューやセキュリティチェックをしたい、
+  values.yaml の設計やテンプレートの構造について相談したい、といった場合に使用する。
+  Kubernetes デプロイ、Helm、k8s マニフェスト、Chart.yaml、values.yaml、helm install/upgrade に関する作業全般でトリガーすること。
+  「helm chart を作って」「この chart をレビューして」「values.yaml を修正して」等の依頼でも必ずトリガーする。
+allowed-tools:
+  - Read
+  - Edit
+  - Write
+  - Glob
+  - Grep
+  - Bash(helm lint*)
+  - Bash(helm template*)
+  - Bash(helm install --dry-run*)
+  - Bash(helm dependency*)
+  - Bash(helm show*)
+---
+
+# Helm Chart スキル
+
+Helm chart の作成・修正・レビューを、`references/` 配下の組織ルールに準拠して行う。
+
+すべての作業は **ヒアリング → 計画提示 → 承認 → 実行 → 検証** の順で進める。
+承認を得るまでファイルの作成・編集は行わない。
+
+## モード判定
+
+ユーザーの依頼内容から作業モードを判定する。判断がつかない場合はユーザーに確認する。
+
+| ユーザーの意図 | モード |
+|---|---|
+| 新しい chart を作りたい | 作成 |
+| 既存の chart を修正・変更したい | 修正 |
+| chart をレビュー・チェックしたい | レビュー |
+
+---
+
+## 作成モード
+
+### ヒアリング
+
+chart を構成するために必要な情報をユーザーから聞き出す。一度にすべてを聞かず、回答内容に応じて追加の質問を行う。
+
+最初に確認する項目:
+- チャート名
+- デプロイ対象アプリケーションの概要（何をするアプリか）
+- ワークロード種別（Deployment / DaemonSet / StatefulSet / Job / CronJob）
+- コンテナイメージのリポジトリとタグ/ダイジェスト
+
+ワークロード種別に応じて追加で確認する項目:
+- 公開ポート、Service タイプ、Ingress、Egress の要否
+- ヘルスチェック方式（HTTP パス、TCP、コマンド）
+- レプリカ数、オートスケーリングの要否
+- 永続ボリュームの要否（StorageClass、サイズ）
+- 環境変数、設定ファイルの有無
+- リソース要求・制限値（CPU / メモリ）
+- 外部リソースへのアクセス要否（AWS, GCP 等 → ServiceAccount / RBAC の判断材料）
+
+ヒアリングでは以下を心がける:
+- ユーザーが回答に迷っている場合はベストプラクティスに基づく推奨値を提案する
+- 「わからない」「おまかせ」と言われた場合はリファレンスのルールに従ったデフォルト値を採用し、計画で明示する
+- 不足情報があればその都度追加で質問する。推測で埋めない
+
+### 計画提示
+
+ヒアリング内容をもとに、作成する chart の全体像を計画として提示する。
+計画は `result/helm-chart-plan-{yyyyMMddHHmm}.md` に保存する。
+
+計画に含める内容:
+- チャート名、ワークロード種別
+- 生成するファイル一覧（ディレクトリ構成）
+- `values.yaml` の主要キーと値
+- 環境別オーバーライド（`values-dev.yaml` / `values-stg.yaml` / `values-prod.yaml`）の差分方針
+- セキュリティ設定（securityContext、RBAC）
+- 特記事項（ユーザー指定値がルールと異なる場合の注記）
+
+計画提示後、ユーザーに承認を求める。修正要望があればヒアリングに戻る。
+
+### 実行
+
+承認後、計画に基づいて chart ファイルを作成する。
+
+### 検証
+
+作成した chart に対して以下を順に実行する。
+
+1. **`helm lint <chart-dir>`** — chart 構造とフォーマットの静的チェック
+   - WARNING も含めてすべて確認する
+   - `icon` 未設定の WARNING は無視してよい
+2. **`helm template <release-name> <chart-dir>`** — テンプレートのレンダリング確認
+   - レンダリングエラーがないことを確認する
+   - 出力されたマニフェストの内容が計画と一致することを目視確認する
+3. **`helm template <release-name> <chart-dir> -f <chart-dir>/values-dev.yaml`** — 環境別 values でのレンダリング確認
+   - `values-dev.yaml` / `values-stg.yaml` / `values-prod.yaml` それぞれで実行する
+   - 環境別の差分が意図通りに反映されていることを確認する
+
+エラーが発生した場合はファイルを修正し、再度検証を実行する。すべてのチェックをパスするまで繰り返す。
+
+---
+
+## 修正モード
+
+### ヒアリング
+
+以下を確認する:
+- 対象チャートのパス
+- 変更したい内容
+
+対象チャートを読み込み、現状を把握したうえで変更の影響範囲を分析する。影響範囲が広い場合や変更意図が曖昧な場合は追加で質問する。
+
+### 計画提示
+
+計画は `result/helm-chart-plan-{yyyyMMddHHmm}.md` に保存する。
+
+計画に含める内容:
+- 変更対象ファイルと変更内容の一覧
+- 変更による影響範囲
+- ルール違反が検出された場合はその指摘と修正案
+
+計画提示後、ユーザーに承認を求める。
+
+### 実行
+
+承認後、計画に基づいてファイルを編集する。
+
+### 検証
+
+編集した chart に対して以下を順に実行する。
+
+1. **`helm lint <chart-dir>`** — chart 構造とフォーマットの静的チェック
+   - WARNING も含めてすべて確認する
+   - `icon` 未設定の WARNING は無視してよい
+2. **`helm template <release-name> <chart-dir>`** — テンプレートのレンダリング確認
+   - レンダリングエラーがないことを確認する
+   - 変更箇所が計画通りに反映されていることを確認する
+3. **`helm template <release-name> <chart-dir> -f <chart-dir>/values-dev.yaml`** — 環境別 values でのレンダリング確認
+   - 環境別 values ファイルが存在する場合、それぞれで実行する
+   - 変更が環境別の値と競合していないことを確認する
+
+エラーが発生した場合はファイルを修正し、再度検証を実行する。すべてのチェックをパスするまで繰り返す。
+
+---
+
+## レビューモード
+
+### ヒアリング
+
+以下を確認する:
+- 対象チャートのパス
+- レビュー観点の指定があるか（セキュリティ、構造、全般 等）
+
+### レビュー実行
+
+対象チャートの全ファイルを読み込み、リファレンスのルールに照らして問題点を検出する。
+レビュー結果は `result/helm-chart-review-{yyyyMMddHHmm}.md` に保存する。
+
+レビュー結果に含める内容:
+- 検出された問題の一覧（問題の内容、該当ファイルと箇所、ルールの根拠、修正案）
+- 問題の重要度（必須修正 / 推奨）
+
+レビュー結果提示後、ユーザーが修正を希望する場合は修正モードに切り替える。
+
+---
+
+## リファレンス読み込みルール
+
+`references/` 配下のファイルは作業内容に応じて必要なものだけを読み込む。一括読み込みはしない。
+
+### 常に読み込む
+- `general-conventions.md` — チャート命名、バージョニング、YAML フォーマットの基本ルール
+
+### 作成モードで読み込む
+
+| タイミング | ファイル | 内容 |
+|---|---|---|
+| chart 構成決定時 | `chart-files.md` | ディレクトリ構成とファイル配置ルール |
+| values.yaml 設計時 | `values.md` | キー命名、構造、標準キー一覧 |
+| テンプレート作成時 | `templates.md` | テンプレート構造、ヘルパー関数、フォーマット |
+| ラベル設計時 | `labels.md` | 必須ラベル、セレクタ、アノテーション |
+| セキュリティ設定時 | `pods-security.md` | securityContext、capabilities、ホスト名前空間 |
+| リソース・プローブ設定時 | `pods-reliability.md` | resources、probes、topologySpreadConstraints |
+| イメージ・セレクタ設定時 | `pods-basic.md` | イメージ指定方式、pullPolicy、セレクタ |
+| RBAC 検討時 | `rbac-basic.md` | ServiceAccount、Role/RoleBinding 構造 |
+| RBAC 権限設計時 | `rbac-least-privilege.md` | 最小権限の原則、verb/resource の選定 |
+| 環境別 values 作成時 | `values-environment.md` | 環境別ファイルの構成と差分ルール |
+| README/NOTES 作成時 | `documentation.md` | helm-docs、NOTES.txt のルール |
+
+### 修正モードで読み込む
+
+変更内容に関連するリファレンスのみを読み込む。たとえば values.yaml の変更なら `values.md`、セキュリティ設定の変更なら `pods-security.md` を読む。
+
+### レビューモードで読み込む
+
+レビュー観点に応じて関連するリファレンスを読み込む。全般レビューの場合は、対象チャートのファイルを読んだうえで問題が疑われる領域のリファレンスを順次読み込む。

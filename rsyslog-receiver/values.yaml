@@ -1,0 +1,189 @@
+# -- イメージリポジトリ
+image:
+  # -- コンテナイメージのリポジトリ
+  repository: "docker.io/rsyslog/syslog_appliance_alpine"
+  # -- コンテナイメージの digest (デプロイ時に必ず指定すること)
+  digest: ""
+  # -- イメージプルポリシー
+  pullPolicy: IfNotPresent
+
+# -- プライベートレジストリ認証 (Pod レベル、例外時のみ)
+imagePullSecrets: []
+
+# -- コンポーネント名 (app.kubernetes.io/component ラベルの値)
+component: "syslog-receiver"
+# -- 製品名 (app.kubernetes.io/part-of ラベルの値、未指定時は Chart.Name)
+partOf: ""
+
+# -- チャート名部分の上書き
+nameOverride: ""
+# -- フルネームの上書き
+fullnameOverride: ""
+
+# -- Pod アノテーション
+podAnnotations: {}
+# -- Pod ラベル
+podLabels: {}
+# -- 全リソース共通ラベル
+extraLabels: {}
+
+# -- レプリカ数
+replicaCount: 1
+
+# -- 更新戦略
+strategy: {}
+
+# -- リビジョン履歴保持数
+revisionHistoryLimit: 3
+
+# -- syslog 受信ポート設定
+syslog:
+  # -- rsyslog がリッスンするコンテナポート
+  port: 1514
+
+# -- 転送先 fluentd 設定
+forwarder:
+  # -- fluentd のホスト名
+  target: "fluentd.logging.svc.cluster.local"
+  # -- fluentd のポート番号
+  port: 24224
+
+# -- Service 設定
+service:
+  # -- Service タイプ
+  type: LoadBalancer
+  # -- Service 公開ポート
+  port: 514
+  # -- コンテナリッスンポート
+  containerPort: 1514
+  # -- ポート名
+  portName: "syslog-udp"
+  # -- プロトコル
+  protocol: UDP
+
+# -- ConfigMap 自動生成
+config:
+  # -- ConfigMap を作成するか
+  enabled: true
+
+# -- リソース要求・制限
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# -- Pod レベルセキュリティコンテキスト
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- コンテナレベルセキュリティコンテキスト
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- ライブネスプローブ
+livenessProbe:
+  tcpSocket:
+    port: syslog-tcp
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# -- レディネスプローブ
+readinessProbe:
+  tcpSocket:
+    port: syslog-tcp
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# -- スタートアッププローブ
+startupProbe:
+  # -- スタートアッププローブを有効にするか
+  enabled: false
+
+# -- ServiceAccount 設定
+serviceAccount:
+  # -- ServiceAccount を作成するか
+  create: true
+  # -- ServiceAccount アノテーション
+  annotations: {}
+  # -- ServiceAccount 名 (空の場合は fullname を使用)
+  name: ""
+  # -- API トークン自動マウント
+  automountToken: false
+
+# -- RBAC 設定
+rbac:
+  # -- RBAC リソースを作成するか
+  create: false
+
+# -- ライフサイクル設定
+lifecycle:
+  preStop:
+    sleep:
+      # -- preStop sleep 秒数
+      seconds: 5
+
+# -- グレースフル終了待機秒数
+terminationGracePeriodSeconds: 30
+
+# -- ノードセレクタ
+nodeSelector: {}
+
+# -- トレレーション
+tolerations: []
+
+# -- アフィニティ
+affinity: {}
+
+# -- トポロジー分散制約
+topologySpreadConstraints: []
+
+# -- 優先度クラス
+priorityClassName: ""
+
+# -- DNS ポリシー
+dnsPolicy: ""
+
+# -- カスタム DNS 設定
+dnsConfig: {}
+
+# -- 初期化コンテナ
+initContainers: []
+
+# -- 追加環境変数
+extraEnv: []
+
+# -- 追加環境変数ソース
+extraEnvFrom: []
+
+# -- 追加ボリューム
+extraVolumes: []
+
+# -- 追加ボリュームマウント
+extraVolumeMounts: []
+
+# -- NetworkPolicy 設定
+networkPolicy:
+  # -- NetworkPolicy を作成するか
+  enabled: false

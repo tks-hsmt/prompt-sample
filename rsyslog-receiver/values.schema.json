@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["image", "component", "resources", "podSecurityContext", "containerSecurityContext", "serviceAccount", "service", "syslog", "forwarder"],
+  "definitions": {
+    "labelsMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "patternProperties": {
+        "^(app\\.kubernetes\\.io/|helm\\.sh/|kubernetes\\.io/)": false
+      }
+    },
+    "annotationsMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "patternProperties": {
+        "^(kubectl\\.kubernetes\\.io/|deployment\\.kubernetes\\.io/|pod\\.kubernetes\\.io/|app\\.kubernetes\\.io/|helm\\.sh/|kubernetes\\.io/)": false
+      }
+    },
+    "awsAnnotationsMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "patternProperties": {
+        "^(kubectl\\.kubernetes\\.io/|deployment\\.kubernetes\\.io/|pod\\.kubernetes\\.io/|app\\.kubernetes\\.io/|helm\\.sh/|kubernetes\\.io/)": false
+      }
+    }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string" },
+        "pullPolicy": { "const": "IfNotPresent" }
+      },
+      "additionalProperties": false
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+      }
+    },
+    "component": { "type": "string", "minLength": 1 },
+    "partOf": { "type": "string" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "podAnnotations": { "$ref": "#/definitions/annotationsMap" },
+    "podLabels": { "$ref": "#/definitions/labelsMap" },
+    "extraLabels": { "$ref": "#/definitions/labelsMap" },
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "strategy": { "type": "object" },
+    "revisionHistoryLimit": { "type": "integer", "minimum": 0 },
+    "syslog": {
+      "type": "object",
+      "required": ["port"],
+      "properties": {
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "additionalProperties": false
+    },
+    "forwarder": {
+      "type": "object",
+      "required": ["target", "port"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      },
+      "additionalProperties": false
+    },
+    "service": {
+      "type": "object",
+      "required": ["type", "port", "containerPort", "portName", "protocol"],
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "containerPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "portName": { "type": "string", "minLength": 1 },
+        "protocol": { "type": "string", "enum": ["TCP", "UDP"] },
+        "annotations": { "$ref": "#/definitions/awsAnnotationsMap" }
+      },
+      "additionalProperties": false
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "required": ["runAsNonRoot", "runAsUser", "runAsGroup", "fsGroup", "seccompProfile"],
+      "properties": {
+        "runAsNonRoot": { "const": true },
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "runAsGroup": { "type": "integer", "minimum": 1 },
+        "fsGroup": { "type": "integer", "minimum": 1 },
+        "seccompProfile": {
+          "type": "object",
+          "properties": {
+            "type": { "const": "RuntimeDefault" }
+          },
+          "required": ["type"]
+        }
+      }
+    },
+    "containerSecurityContext": {
+      "type": "object",
+      "required": ["runAsNonRoot", "allowPrivilegeEscalation", "readOnlyRootFilesystem", "capabilities"],
+      "properties": {
+        "runAsNonRoot": { "const": true },
+        "runAsUser": { "type": "integer", "minimum": 1 },
+        "runAsGroup": { "type": "integer", "minimum": 1 },
+        "allowPrivilegeEscalation": { "const": false },
+        "privileged": { "const": false },
+        "readOnlyRootFilesystem": { "const": true },
+        "capabilities": {
+          "type": "object",
+          "required": ["drop"],
+          "properties": {
+            "drop": {
+              "type": "array",
+              "items": { "const": "ALL" },
+              "minItems": 1,
+              "maxItems": 1
+            },
+            "add": {
+              "type": "array",
+              "items": { "enum": ["NET_BIND_SERVICE"] },
+              "maxItems": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "livenessProbe": { "type": "object" },
+    "readinessProbe": { "type": "object" },
+    "startupProbe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "annotations": { "$ref": "#/definitions/awsAnnotationsMap" },
+        "name": { "type": "string" },
+        "automountToken": { "type": "boolean" },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+          }
+        }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "preStop": {
+          "type": "object",
+          "properties": {
+            "sleep": {
+              "type": "object",
+              "properties": {
+                "seconds": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array" },
+    "priorityClassName": { "type": "string" },
+    "dnsPolicy": { "type": "string" },
+    "dnsConfig": { "type": "object" },
+    "initContainers": { "type": "array" },
+    "extraEnv": { "type": "array" },
+    "extraEnvFrom": { "type": "array" },
+    "extraVolumes": { "type": "array" },
+    "extraVolumeMounts": { "type": "array" },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

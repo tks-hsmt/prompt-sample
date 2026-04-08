@@ -1,7 +1,0 @@
-{{ include "CHARTNAME.fullname" . }} DaemonSet がデプロイされました。
-
-1. DaemonSet の状態を確認:
-  kubectl get daemonset {{ include "CHARTNAME.fullname" . }} -n {{ .Release.Namespace }}
-
-2. 各ノードの Pod を確認:
-  kubectl get pods -l "app.kubernetes.io/instance={{ .Release.Name }}" -n {{ .Release.Namespace }} -o wide
