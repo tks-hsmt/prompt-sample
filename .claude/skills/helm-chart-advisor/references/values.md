@@ -74,6 +74,8 @@ values のキーは、対応する Kubernetes API の階層に合わせて命名
 
 参照先カラムは **Kubernetes マニフェスト上のフィールドパス** を示す。Helm テンプレート(`spec.template.spec.containers[]` 等)はこの階層と一致させる。
 
+セクション見出しやキーの用途欄に括弧でワークロード種別が記載されている場合、**該当しないワークロードでは values.yaml にそのキーを定義しない**。括弧がないセクション・キーは全ワークロード共通。
+
 ### イメージ・レジストリ
 
 | 用途 | キー | テンプレート上の参照箇所 |
@@ -167,7 +169,7 @@ values のキーは、対応する Kubernetes API の階層に合わせて命名
 | コンテナリッスンポート | `service.containerPort` | `spec.template.spec.containers[].ports[].containerPort` |
 | ポート名 | `service.portName` | Service `spec.ports[].name` および `containers[].ports[].name` |
 | プロトコル | `service.protocol` | Service `spec.ports[].protocol` |
-| Headless Service フラグ | `service.headless` | Service `spec.clusterIP: None`(StatefulSet 用) |
+| Headless Service フラグ（**StatefulSet のみ**） | `service.headless` | Service `spec.clusterIP: None` |
 
 ### Ingress(Deployment / StatefulSet)
 
@@ -190,13 +192,15 @@ values のキーは、対応する Kubernetes API の階層に合わせて命名
 
 ### レプリカ・更新戦略
 
+このセクションのキーはワークロード種別ごとに適用対象が異なる。各キーの括弧内を確認し、該当しないワークロードでは定義しない。
+
 | 用途 | キー | テンプレート上の参照箇所 |
 |---|---|---|
-| レプリカ数(Deployment / StatefulSet) | `replicaCount` | `spec.replicas` |
-| 更新戦略(Deployment) | `strategy` | Deployment `spec.strategy` |
-| 更新戦略(DaemonSet / StatefulSet) | `updateStrategy` | DaemonSet `spec.updateStrategy` / StatefulSet `spec.updateStrategy` |
-| Pod 管理ポリシー(StatefulSet) | `podManagementPolicy` | StatefulSet `spec.podManagementPolicy` |
-| リビジョン履歴保持数 | `revisionHistoryLimit` | `spec.revisionHistoryLimit` |
+| レプリカ数（**Deployment / StatefulSet のみ**） | `replicaCount` | `spec.replicas` |
+| 更新戦略（**Deployment のみ**） | `strategy` | Deployment `spec.strategy` |
+| 更新戦略（**DaemonSet / StatefulSet のみ**） | `updateStrategy` | DaemonSet `spec.updateStrategy` / StatefulSet `spec.updateStrategy` |
+| Pod 管理ポリシー（**StatefulSet のみ**） | `podManagementPolicy` | StatefulSet `spec.podManagementPolicy` |
+| リビジョン履歴保持数（**Deployment / StatefulSet / DaemonSet**） | `revisionHistoryLimit` | `spec.revisionHistoryLimit` |
 
 ### オートスケーリング / 中断予算(Deployment / StatefulSet)
 
@@ -217,10 +221,10 @@ values のキーは、対応する Kubernetes API の階層に合わせて命名
 | StorageClass 名 | `persistence.storageClass` | PVC `spec.storageClassName` / `volumeClaimTemplates[].spec.storageClassName` |
 | アクセスモード | `persistence.accessModes` | PVC `spec.accessModes` / `volumeClaimTemplates[].spec.accessModes` |
 | ストレージサイズ | `persistence.size` | PVC `spec.resources.requests.storage` |
-| PVC 保持ポリシー(StatefulSet) | `persistentVolumeClaimRetentionPolicy.whenDeleted` | StatefulSet `spec.persistentVolumeClaimRetentionPolicy.whenDeleted` |
+| PVC 保持ポリシー（**StatefulSet のみ**） | `persistentVolumeClaimRetentionPolicy.whenDeleted` | StatefulSet `spec.persistentVolumeClaimRetentionPolicy.whenDeleted` |
 | 〃 | `persistentVolumeClaimRetentionPolicy.whenScaled` | StatefulSet `spec.persistentVolumeClaimRetentionPolicy.whenScaled` |
 
-### Job / CronJob
+### Job / CronJob（**Job / CronJob のみ**）
 
 | 用途 | キー | テンプレート上の参照箇所 |
 |---|---|---|
@@ -238,7 +242,7 @@ values のキーは、対応する Kubernetes API の階層に合わせて命名
 | 必要完了数(Job / CronJob) | `completions` | Job `spec.completions` |
 | 並列実行数(Job / CronJob) | `parallelism` | Job `spec.parallelism` |
 
-### DaemonSet 特有
+### DaemonSet 特有（**DaemonSet のみ**）
 
 | 用途 | キー | テンプレート上の参照箇所 |
 |---|---|---|
