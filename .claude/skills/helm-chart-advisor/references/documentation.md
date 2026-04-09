@@ -49,17 +49,9 @@
 | `chart.valuesTable` | `values.yaml` の `# --` コメントから自動生成された設定値の表 |
 | `chart.maintainersSection` | `Chart.yaml` の `maintainers` セクション |
 
-### 値の自動生成と `values.yaml` のドキュメント要件
+### `chart.valuesTable` の生成元
 
-`chart.valuesTable` は `values.yaml` の **`# --` プレフィックス付きコメント** を読み取って表を生成する。
-
-helm-docs のコメント書式:
-```yaml
-# -- serverHost は Web サーバのホスト名
-serverHost: example.com
-# -- serverPort は Web サーバの HTTP リッスンポート
-serverPort: 9191
-```
+`chart.valuesTable` は `values.yaml` 内の `# --` プレフィックス付きコメントを読み取って設定値テーブルを自動生成する。`# --` コメントの記述ルール自体は `values.md` で定義しているため、本リファレンスではレビュー対象としない。
 
 ### 「概要」セクションの手動記述
 
