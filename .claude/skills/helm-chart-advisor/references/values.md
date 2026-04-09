@@ -323,4 +323,71 @@ helm install myapp ./myapp --set servers[0].port=8080
 
 ---
 
+## values.yaml のコメントルール
+
+`values.yaml` で定義された **すべてのプロパティに `# --` コメントを付ける**。コメントの最初の文は **プロパティ名で始め**、用途を少なくとも 1 文で説明する。
+
+**良い例**:
+```yaml
+# -- serverHost は Web サーバのホスト名
+serverHost: "example.com"
+# -- serverPort は Web サーバの HTTP リッスンポート
+serverPort: 9191
+```
+
+**悪い例**(プロパティ名で始まっていない):
+```yaml
+# -- Web サーバのホスト名
+serverHost: "example.com"
+```
+
+**悪い例**(コメントがない):
+```yaml
+serverHost: "example.com"
+serverPort: 9191
+```
+
+理由:
+- プロパティ名で始めることで `grep` による検索が容易になる。
+- `# --` は helm-docs がドキュメントコメントとして認識し、README の設定値テーブルを自動生成する際のソースになる。コメントがないプロパティは README から欠落する。
+
+### 内部補足コメント
+
+利用者向けの説明ではなく、チャート開発者向けの補足情報を残したい場合は、通常の `#` コメントを併記してよい。通常の `#` コメントは helm-docs に無視されるため、README には露出しない。
+
+```yaml
+# このキーは v2.0 で廃止予定。移行先は newServerHost。
+# -- serverHost は Web サーバのホスト名
+serverHost: "example.com"
+```
+
+### セクション区切りコメント
+
+values.yaml 内のキーが多い場合は、通常の `#` コメントでセクションを区切ることを推奨する。
+
+```yaml
+##
+# イメージ・レジストリ
+##
+
+# -- image.repository はコンテナイメージのリポジトリ
+image:
+  repository: "myorg/myapp"
+  # -- image.digest はコンテナイメージの digest
+  digest: ""
+  # -- image.pullPolicy はイメージプルポリシー
+  pullPolicy: IfNotPresent
+
+##
+# Service
+##
+
+# -- service.type は Service のタイプ
+service:
+  type: ClusterIP
+  # -- service.port は Service の公開ポート
+  port: 80
+```
+
+---
 
