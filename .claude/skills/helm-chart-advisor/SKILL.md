@@ -7,16 +7,24 @@ description: |
   Kubernetes デプロイ、Helm、k8s マニフェスト、Chart.yaml、values.yaml、helm install/upgrade に関する作業全般でトリガーすること。
   「helm chart を作って」「この chart をレビューして」「values.yaml を修正して」等の依頼でも必ずトリガーする。
 allowed-tools:
-  - Read
-  - Edit
-  - Write
-  - Glob
-  - Grep
-  - Bash(helm lint*)
-  - Bash(helm template*)
-  - Bash(helm install --dry-run*)
-  - Bash(helm dependency*)
-  - Bash(helm show*)
+  - write
+  - shell(helm lint)
+  - shell(helm template)
+  - shell(helm dependency:*)
+  - shell(helm show:*)
+  - shell(helm install --dry-run)
+  - shell(helm upgrade --dry-run)
+# --- Claude Code 用(参考。Claude Code で使う場合は下記に差し替え)---
+#  - Read
+#  - Edit
+#  - Write
+#  - Glob
+#  - Grep
+#  - Bash(helm lint*)
+#  - Bash(helm template*)
+#  - Bash(helm install --dry-run*)
+#  - Bash(helm dependency*)
+#  - Bash(helm show*)
 ---
 
 # Helm Chart スキル
