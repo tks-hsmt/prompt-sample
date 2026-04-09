@@ -16,8 +16,8 @@ myapp/
 ├── values-dev.yaml                 # 必須
 ├── values-stg.yaml                 # 必須
 ├── values-prod.yaml                # 必須
-├── README.md.gotmpl                # 必須
-├── README.md                       # helm-docs で自動生成(CI 管理)
+├── README.md                       # 任意
+├── README.md.gotmpl                # 任意(helm-docs 導入時)
 ├── files/                          # 任意(外部設定ファイルがある場合のみ)
 ├── charts/                         # 任意(サブチャート依存がある場合のみ)
 └── templates/                      # 必須
@@ -51,8 +51,6 @@ myapp/
 | `values-dev.yaml` | 開発環境のオーバーライド |
 | `values-stg.yaml` | ステージング環境のオーバーライド |
 | `values-prod.yaml` | 本番環境のオーバーライド |
-| `README.md.gotmpl` | helm-docs のテンプレート |
-| `README.md` | helm-docs で自動生成された README(CI 管理、手動編集禁止) |
 
 ---
 
