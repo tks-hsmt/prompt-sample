@@ -207,9 +207,14 @@ podSecurityContext: {}
 
 ## ServiceAccount トークンの自動マウント
 
-ServiceAccount トークンは **既定でマウントしない**。`automountServiceAccountToken: false` を既定値とし、Kubernetes API へアクセスする必要のある Pod のみ values で `true` に上書きする。
+ServiceAccount トークンは **既定でマウントしない**。`automountServiceAccountToken: false` を既定値とし、SA トークンを必要とする Pod のみ values で `true` に上書きする。
 
-**良い例**(一般的なアプリ、K8s API アクセスなし):
+SA トークンのマウントが必要なケース:
+- Kubernetes API にアクセスする Pod（オペレータ、コントローラ等）
+- クラウドの Workload Identity を使用する Pod（EKS Pod Identity / IRSA、GKE Workload Identity、Azure Workload Identity）
+- SA トークンで外部システムに認証する Pod（Vault Agent 等）
+
+**良い例**(一般的なアプリ、SA トークン不要):
 ```yaml
 # values.yaml
 serviceAccount:
@@ -224,15 +229,25 @@ rbac:
   create: true               # 必要な権限を Role で付与
 ```
 
+**良い例**(Workload Identity で AWS リソースにアクセス、K8s API アクセスは不要):
+```yaml
+serviceAccount:
+  automountToken: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/my-role"
+rbac:
+  create: false              # K8s API の RBAC は不要
+```
+
 **悪い例**:
 ```yaml
 serviceAccount:
-  automountToken: true       # K8s API を使わないのに自動マウント有効
+  automountToken: true       # SA トークンを使う理由がないのに自動マウント有効
 ```
 
 理由:
-- SA トークンはコンテナ内に JWT ファイルとしてマウントされ、Kubernetes API に対する認証情報となる。Pod が侵害された場合、攻撃者はこのトークンで API サーバを操作できる。
-- ほとんどの業務アプリは K8s API にアクセスしないため、トークンをマウントする理由がない。攻撃面を縮小するため既定で無効化する。
+- SA トークンはコンテナ内に JWT ファイルとしてマウントされる。Kubernetes API への認証情報として、また Workload Identity ではクラウドリソースへの認証情報としても機能する。Pod が侵害された場合、攻撃者はこのトークンで API サーバやクラウドリソースを操作できる。
+- SA トークンを必要としないアプリではマウントする理由がない。攻撃面を縮小するため既定で無効化する。
 
 ---
 

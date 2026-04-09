@@ -2,7 +2,7 @@
 
 本リファレンスでは RBAC リソースの基本構造に関するルールを定める。
 
-本ルール体系では、`pods-security.md` で `automountServiceAccountToken: false` をデフォルトにしている方針と整合させるため、`rbac.create` のデフォルトを **`false`** とする。これは現代の業務アプリの大半が Kubernetes API にアクセスしないという実態に合わせた判断である。
+`rbac.create` のデフォルトは **`false`** とする。RBAC リソース（Role / RoleBinding）は Kubernetes API への権限付与であり、K8s API にアクセスしないアプリには不要である。なお、`rbac.create` と `automountToken` は独立した判断である。Workload Identity（IRSA 等）を使用するアプリは `automountToken: true` かつ `rbac.create: false` が正当な構成となる。
 
 ---
 
@@ -56,16 +56,27 @@ rbac:
 
 `rbac.create` のデフォルトは **`false`** とする。Role / RoleBinding / ClusterRole / ClusterRoleBinding はデフォルトで作成しない。
 
-Kubernetes API へアクセスする必要があるチャート(オペレータ、コントローラ、一部のバッチ処理等)のみ、values で `rbac.create: true` に上書きする。
+Kubernetes API へアクセスする必要があるチャート（オペレータ、コントローラ、一部のバッチ処理等）のみ、values で `rbac.create: true` に上書きする。
 
-**良い例**(通常の業務アプリ):
+**良い例**(通常の業務アプリ、SA トークン不要):
 ```yaml
 # values.yaml
 rbac:
-  create: false           # デフォルト。K8s API にアクセスしない
+  create: false
 serviceAccount:
   create: true
-  automountToken: false   # K8s API トークンもマウントしない
+  automountToken: false
+```
+
+**良い例**(Workload Identity で AWS リソースにアクセス、K8s API アクセスは不要):
+```yaml
+rbac:
+  create: false              # K8s API の RBAC は不要
+serviceAccount:
+  create: true
+  automountToken: true       # Workload Identity に SA トークンが必要
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/my-role"
 ```
 
 **良い例**(K8s API アクセスが必要なオペレータ等):
@@ -83,13 +94,13 @@ rbac:
   create: true            # K8s API を使わないのに RBAC を作成
 serviceAccount:
   create: true
-  automountToken: false   # トークンなしなのに Role/RoleBinding だけ存在
+  automountToken: false
 ```
 
 理由:
-- ほとんどの業務アプリは Kubernetes API にアクセスしない(HTTP サーバ、ワーカー、バッチ処理等)。RBAC リソースを作成してもまったく使われず、クラスタ内にゴミが増えるだけである。
-- `pods-security.md` の `automountServiceAccountToken: false` デフォルト方針と整合する。トークンをマウントしないのに Role を作成するのは不整合である。
-- secure-by-default 方針により、明示的に必要と判断された場合にのみ権限を付与する。
+- ほとんどの業務アプリは Kubernetes API にアクセスしない。RBAC リソースを作成してもまったく使われず、クラスタ内にゴミが増えるだけである。
+- `rbac.create` は K8s API への権限付与を制御するものであり、`automountToken` とは独立した判断である。Workload Identity を使用するアプリは `automountToken: true` かつ `rbac.create: false` が正当な構成となる。
+- secure-by-default 方針により、明示的に必要と判断された場合にのみ K8s API 権限を付与する。
 
 ---
 
