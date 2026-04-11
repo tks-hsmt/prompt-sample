@@ -255,3 +255,22 @@ spec:
 - ヘルパーを使うことで、`serviceAccount.create` の true/false と `serviceAccount.name` の有無の組み合わせ(4 パターン)をすべて正しく処理できる。
 - 直接参照は `create: false` かつ `name: ""` のケースで `""` を返してしまい、Pod 作成時にバリデーションエラーとなる。
 - ヘルパー化することでチャート間の挙動が揃い、レビュー時の認知負荷が下がる。
+
+### Pod Identity / IRSA 利用時の `serviceAccount.name` 明示指定
+
+EKS Pod Identity や IRSA を使用する場合、SA 名は AWS 側の設定（Pod Identity Association の `serviceAccount` フィールド、または IAM Role の trust policy の `sub` 条件）と**完全一致**しなければならない。`fullname`（リリース名依存）をそのまま使うと、リリース名の変更で SA 名が変わり Pod Identity が壊れる。
+
+このため、Pod Identity / IRSA を使用するチャートでは **`serviceAccount.name` を values.yaml で明示的に指定するのが正当な構成** である。ヘルパーは `serviceAccount.name` が指定されていればそれをそのまま返すため、ヘルパー自体の変更は不要。
+
+**良い例**（Pod Identity 使用時）:
+```yaml
+# values.yaml
+serviceAccount:
+  create: true
+  name: "my-app"                    # Pod Identity Association と一致させる
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/my-app"
+  automountToken: true
+```
+
+`serviceAccount.name` が明示指定されており、かつ Pod Identity / IRSA のアノテーションが設定されている場合、`fullname` を使用していないことは違反ではない。

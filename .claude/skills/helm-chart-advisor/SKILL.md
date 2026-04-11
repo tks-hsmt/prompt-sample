@@ -1,11 +1,6 @@
 ---
 name: helm-chart-advisor
-description: |
-  Helm chart の作成・修正・レビューを、組織ルールとベストプラクティスに基づいて行うスキル。
-  ユーザーが Helm chart を新規作成したい、既存の Helm chart を修正したい、Helm chart のレビューやセキュリティチェックをしたい、
-  values.yaml の設計やテンプレートの構造について相談したい、といった場合に使用する。
-  Kubernetes デプロイ、Helm、k8s マニフェスト、Chart.yaml、values.yaml、helm install/upgrade に関する作業全般でトリガーすること。
-  「helm chart を作って」「この chart をレビューして」「values.yaml を修正して」等の依頼でも必ずトリガーする。
+description: Helm chart の作成・修正・レビューを、組織ルールとベストプラクティスに基づいて行うスキル。ユーザーが Helm chart を新規作成したい、既存の Helm chart を修正したい、Helm chart のレビューやセキュリティチェックをしたい、values.yaml の設計やテンプレートの構造について相談したい、といった場合に使用する。 Kubernetes デプロイ、Helm、k8s マニフェスト、Chart.yaml、values.yaml、helm install/upgrade に関する作業全般でトリガーすること。「helm chart を作って」「この chart をレビューして」「values.yaml を修正して」等の依頼でも必ずトリガーする。
 allowed-tools:
   - write
   - shell(helm lint)
