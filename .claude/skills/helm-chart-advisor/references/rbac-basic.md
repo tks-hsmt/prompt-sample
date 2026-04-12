@@ -6,14 +6,16 @@
 
 ## ServiceAccount トークンの自動マウント
 
-ServiceAccount トークンは **既定でマウントしない**。`automountServiceAccountToken: false` を既定値とし、SA トークンを必要とする Pod のみ values で `true` に上書きする。
+`serviceAccount.automountToken` の正しい値は、チャートの用途に基づいて以下のように判定する。
 
-SA トークンはコンテナ内に JWT ファイルとしてマウントされ、Kubernetes API への認証情報として、また Workload Identity ではクラウドリソースへの認証情報としても機能する。Pod が侵害された場合、攻撃者はこのトークンで API サーバやクラウドリソースを操作できるため、不要な場合はマウントしない。
+| チャートの用途 | 正しい値 | 理由 |
+|---|---|---|
+| EKS Pod Identity / IRSA / Workload Identity を使用する | `true` | クラウドリソースへの認証に SA トークンが必要 |
+| Kubernetes API にアクセスする（オペレータ、コントローラ等） | `true` | K8s API への認証に SA トークンが必要 |
+| SA トークンで外部システムに認証する（Vault Agent 等） | `true` | 外部認証に SA トークンが必要 |
+| 上記いずれにも該当しない | `false` | SA トークンは不要であり、マウントすると攻撃面が増える |
 
-SA トークンのマウントが必要なケース:
-- Kubernetes API にアクセスする Pod（オペレータ、コントローラ等）
-- クラウドの Workload Identity を使用する Pod（EKS Pod Identity / IRSA、GKE Workload Identity、Azure Workload Identity）
-- SA トークンで外部システムに認証する Pod（Vault Agent 等）
+SA トークンはコンテナ内に JWT ファイルとしてマウントされ、Kubernetes API やクラウドリソースへの認証情報として機能する。Pod が侵害された場合、攻撃者はこのトークンで API サーバやクラウドリソースを操作できるため、不要な場合はマウントしない。
 
 ---
 
@@ -119,13 +121,15 @@ serviceAccount:
 
 ## Role と ClusterRole の使い分け
 
-**原則として `Role` + `RoleBinding` を使用する**。`ClusterRole` / `ClusterRoleBinding` は以下のいずれかの正当な理由がある場合に限り使用できる。
+使用する RBAC リソースの種別は、チャートがアクセスするリソースのスコープに基づいて以下のように判定する。
 
-- クラスタスコープのリソース(`Node`, `PersistentVolume`, `StorageClass`, `CertificateSigningRequest` 等)にアクセスする必要がある
-- 複数 namespace を横断して監視・制御する必要がある(オペレータ、コントローラ等)
-- `nonResourceURLs`(`/metrics`, `/healthz`, `/api/*` 等)にアクセスする必要がある
-
-`ClusterRole` を定義しつつスコープは特定 namespace に限定したい場合は、**`ClusterRole` + `RoleBinding`** のパターン(ClusterRole の定義を再利用しつつ、RoleBinding で namespace を限定する)を使用してもよい。
+| アクセスするリソースの性質 | 使用する RBAC リソース |
+|---|---|
+| namespace スコープのリソースのみ（ConfigMap, Secret, Pod 等） | `Role` + `RoleBinding` |
+| クラスタスコープのリソース（`Node`, `PersistentVolume`, `StorageClass` 等） | `ClusterRole` + `ClusterRoleBinding` |
+| 複数 namespace を横断して監視・制御（オペレータ、コントローラ等） | `ClusterRole` + `ClusterRoleBinding` |
+| `nonResourceURLs`（`/metrics`, `/healthz` 等） | `ClusterRole` + `ClusterRoleBinding` |
+| ClusterRole の定義を再利用しつつスコープは特定 namespace に限定 | `ClusterRole` + `RoleBinding` |
 
 **良い例**(原則: Role + RoleBinding):
 ```yaml

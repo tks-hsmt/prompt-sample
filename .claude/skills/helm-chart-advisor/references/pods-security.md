@@ -205,11 +205,14 @@ podSecurityContext: {}
 
 ---
 
-## ホスト名前空間の使用禁止
+## ホスト名前空間の使用
 
-Pod は **ホスト名前空間を使用しない**。`hostNetwork`, `hostPID`, `hostIPC` はすべて `false` とする。
+`hostNetwork`, `hostPID`, `hostIPC` の正しい値は、ワークロード種別に基づいて以下のように判定する。
 
-ただし、**DaemonSet チャートテンプレートに限り**、`values.schema.json` で `hostNetwork: true` への上書きを許可する。Deployment / StatefulSet / Job / CronJob チャートテンプレートでは schema で `false` 固定とする。
+| ワークロード種別 | `hostNetwork` | `hostPID` / `hostIPC` |
+|---|---|---|
+| DaemonSet（ノードエージェント等） | `true` を許可（schema で上書き可） | 原則 `false`、必要時のみ values で上書き |
+| Deployment / StatefulSet / Job / CronJob | `false` 固定（schema で `false` 強制） | `false` 固定（schema で `false` 強制） |
 
 **良い例**(通常のワークロード):
 ```yaml
