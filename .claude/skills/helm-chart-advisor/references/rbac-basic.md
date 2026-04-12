@@ -4,6 +4,17 @@
 
 `rbac.create` のデフォルトは **`false`** とする。RBAC リソース（Role / RoleBinding）は Kubernetes API への権限付与であり、K8s API にアクセスしないアプリには不要である。なお、`rbac.create` と `automountToken` は独立した判断である。Workload Identity（IRSA 等）を使用するアプリは `automountToken: true` かつ `rbac.create: false` が正当な構成となる。
 
+## ServiceAccount トークンの自動マウント
+
+ServiceAccount トークンは **既定でマウントしない**。`automountServiceAccountToken: false` を既定値とし、SA トークンを必要とする Pod のみ values で `true` に上書きする。
+
+SA トークンはコンテナ内に JWT ファイルとしてマウントされ、Kubernetes API への認証情報として、また Workload Identity ではクラウドリソースへの認証情報としても機能する。Pod が侵害された場合、攻撃者はこのトークンで API サーバやクラウドリソースを操作できるため、不要な場合はマウントしない。
+
+SA トークンのマウントが必要なケース:
+- Kubernetes API にアクセスする Pod（オペレータ、コントローラ等）
+- クラウドの Workload Identity を使用する Pod（EKS Pod Identity / IRSA、GKE Workload Identity、Azure Workload Identity）
+- SA トークンで外部システムに認証する Pod（Vault Agent 等）
+
 ---
 
 ## 対象となる RBAC リソース
@@ -33,9 +44,11 @@ rbac:
 serviceAccount:
   create: true
   name: ""
-  annotations: {}
+  annotations: {}       # IRSA 等アノテーションベース認証を使用する場合のみ
   automountToken: false
 ```
+
+`serviceAccount.annotations` およびテンプレートでの pass-through は、IRSA 等アノテーションベースの認証方式を使用する場合に定義する。EKS Pod Identity など SA アノテーションが不要な方式では定義不要である。
 
 **悪い例**:
 ```yaml

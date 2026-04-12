@@ -51,6 +51,10 @@ containers:
 - digest は Kubernetes が起動時にレジストリと突き合わせて検証するため、改ざん検知にもなる。
 - CI/CD パイプラインでは、`docker build` → `docker push` 後に出力される digest を `image.digest` へ反映する手順を組む。
 
+### appVersion と Docker タグの関係
+
+Docker タグは英数字とダッシュしか許容せず `+` が使えない。よって `appVersion` には build metadata を含めず、`image.tag` のフォールバックとして安全に使える形に保つ。build metadata が必要なら `Chart.yaml` の `version` 側に付ける。
+
 ---
 
 ## ImagePullPolicy
@@ -141,7 +145,7 @@ spec:
 
 Deployment / StatefulSet / DaemonSet / ReplicaSet / Job は **`spec.selector.matchLabels` を必ず明示する**。省略すると `.spec.template.metadata.labels` の全ラベルがセレクタとして使われ、`version` や `chart` などの可変ラベルが混入して `helm upgrade` で `field is immutable` エラーが発生する。
 
-セレクタには **不変ラベルのみで構成される `selectorLabels` ヘルパーを使用する**。詳細な設計、どのラベルが不変か、および `selectorLabels` と `labels` の分離については `labels.md` を参照すること。
+セレクタには **不変ラベルのみで構成される `selectorLabels` ヘルパーを使用する**。
 
 **良い例**:
 ```gotemplate

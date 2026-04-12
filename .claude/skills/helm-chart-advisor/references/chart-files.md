@@ -38,9 +38,75 @@ myapp/
 
 ---
 
+## チャート名
+
+チャート名は小文字の英字と数字で構成する。単語はハイフン（-）で区切ることができる。大文字、アンダースコア、ドットは使用しない。
+
+**良い例**:
+> aws-cluster-autoscaler
+
+**悪い例**:
+> aws_cluster_autoscaler
+> aws.cluster.autoscaler
+> awsClusterAutoscaler
+
+---
+
+## Chart.yaml の内容ルール
+
+### バージョン番号
+
+`Chart.yaml` のバージョンは **SemVer 2** に厳密に従う。`version` はチャート自身のバージョン、`appVersion` は同梱アプリのバージョンであり、両者は無関係。`appVersion` は YAML パーサーに文字列として扱わせるため必ずクォートする。build metadata(`+xxx`)を使う場合は `version` 側のみに付与し、`appVersion` は Docker tag 互換の素の形に保つ。
+
+**良い例**:
+```yaml
+apiVersion: v2
+name: myapp
+type: application
+version: 1.4.2
+appVersion: "2.7.1"
+```
+
+**悪い例**:
+```yaml
+apiVersion: v2
+name: myapp
+version: v1.2
+appVersion: 1.0
+```
+
+理由:
+- `v1.2` は先頭 `v` かつ PATCH 欠落で SemVer 2 違反。
+- `appVersion: 1.0` はクォートがなく YAML が float として解釈する。git SHA 風の値(例: `1234e10`)では指数表記として誤解釈される危険もある。
+
+### 依存チャートのバージョン指定
+
+再現性は `Chart.lock` で担保し、`dependencies[].version` は完全固定ではなくパッチレベルのレンジで指定する。
+
+**良い例**:
+```yaml
+dependencies:
+  - name: postgresql
+    version: ~13.2.24
+    repository: https://charts.bitnami.com/bitnami
+```
+
+**悪い例**:
+```yaml
+dependencies:
+  - name: postgresql
+    version: 13.2.24
+    repository: https://charts.bitnami.com/bitnami
+```
+
+理由:
+- 完全固定するとセキュリティパッチの取り込みが手動更新に依存してしまう。`~13.2.24`(= `>=13.2.24, <13.3.0`)ならパッチには追従しつつマイナー以上の破壊的変更は防げる。
+
+---
+
 ## ルート直下の必須ファイル
 
-以下のファイルはチャートルート直下に必ず配置する。**ファイルが存在することを必須とする**。各ファイルの中身の記述ルールは別文書を参照。
+以下のファイルはチャートルート直下に必ず配置する。**ファイルが存在することを必須とする**。
 
 | ファイル | 役割 |
 |---|---|

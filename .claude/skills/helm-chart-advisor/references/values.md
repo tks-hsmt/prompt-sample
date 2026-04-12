@@ -251,7 +251,6 @@ server:
 | ホストネットワーク使用 | `hostNetwork` | `spec.template.spec.hostNetwork` |
 | ホスト PID 名前空間共有 | `hostPID` | `spec.template.spec.hostPID` |
 
-`hostNetwork` / `hostPID` / `hostIPC` は **DaemonSet チャートテンプレートでのみ** `values.schema.json` による `true` への上書きを許可する。Deployment / StatefulSet / Job / CronJob チャートテンプレートでは schema で `false` 固定とする。
 
 ---
 
@@ -396,4 +395,25 @@ service:
 ```
 
 ---
+
+## 環境別 values ファイルの記述ルール
+
+環境別 values ファイル(`values-dev.yaml` / `values-stg.yaml` / `values-prod.yaml`)は **差分だけを記述する**。`values.yaml` の内容を丸ごとコピーしてはならない。
+
+理由:
+- 差分だけにすることで、各環境でどの値を変えているかが一目で分かる。
+- `values.yaml` のデフォルト値を変更したとき、環境別ファイルが自動的に追従する。全コピーしていると環境ごとに手動更新が必要になり、更新漏れが発生する。
+
+### 必須オーバーライドキー
+
+以下のキーは `values-dev.yaml` / `values-stg.yaml` / `values-prod.yaml` で必ず値を上書きする。
+
+| キー | 理由 |
+|---|---|
+| `replicaCount` | 環境ごとに台数を変更可能とする |
+| `image.repository` | 環境別にリポジトリが異なるため |
+| `resources.requests` | 環境のトラフィック量に応じて変える |
+| `resources.limits` | 同上 |
+
+その他のキーについては必要に応じてオーバーライドする。
 

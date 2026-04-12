@@ -307,9 +307,30 @@ data:
     {{- tpl (.Files.Get "files/rsyslog.conf") . | nindent 4 }}
 ```
 
-### 外部ファイルに `{{` / `}}` 構文が登場する場合: インライン
+### 外部ファイルに `{{` / `}}` 構文が登場する場合
 
-Grafana プロビジョニング、Consul Template、Go テンプレートなど、設定ファイル内に `{{` / `}}` 構文が登場する場合は、外部ファイル化せずに `templates/configmap.yaml` にインラインで記述する。
+外部ファイル内の `{{` / `}}` には以下の 2 種類がある。レビュー時は外部ファイルの内容を確認し、どちらに該当するかを判別してから判定する。
+
+#### Helm テンプレート構文として `tpl` で評価させる場合: 問題なし
+
+外部ファイル内の `{{` / `}}` がすべて Helm テンプレート構文（`.Values.*`, `.Release.*`, `include`, `if`, `range` 等）であり、`tpl` で評価させることが意図である場合、`tpl (.Files.Get ...)` の使用は正当である。
+
+```gotemplate
+# files/app.conf — Helm テンプレート構文のみ
+server_name = {{ .Values.app.serverName | quote }}
+log_level = {{ .Values.app.logLevel }}
+```
+```gotemplate
+# templates/configmap.yaml
+data:
+  app.conf: |
+    {{- tpl (.Files.Get "files/app.conf") . | nindent 4 }}
+```
+
+#### 非 Helm のテンプレート構文を含む場合: インライン化
+
+Grafana のアラートテンプレート（`{{ .alertname }}`）、Consul Template（`{{ key "..." }}`）、Go の `text/template` など、**Helm 以外のテンプレートエンジン向けの `{{` / `}}` 構文** が含まれる場合は、`tpl` が誤って解釈して構文衝突が発生する。この場合は外部ファイル化せず `templates/configmap.yaml` にインラインで記述する。
+
 ```gotemplate
 # templates/configmap.yaml
 apiVersion: v1
@@ -328,8 +349,9 @@ data:
 ```
 
 理由:
-- `{{` / `}}` を含む外部ファイルを `tpl` に通すと、外部ファイル内の `{{` も Helm が解釈しようとして構文衝突が発生する。エスケープで回避すると `{{ "{{" }}` のような記述が増えて可読性が著しく損なわれる。
+- 非 Helm の `{{` / `}}` を含む外部ファイルを `tpl` に通すと、Helm が解釈しようとして構文衝突が発生する。エスケープで回避すると `{{ "{{" }}` のような記述が増えて可読性が著しく損なわれる。
 - インラインなら構文衝突は発生せず、エスケープも不要。
+- Helm テンプレート構文のみで構成された外部ファイルを `tpl` に通すのは `tpl` 関数の正当な使い方であり、違反ではない。
 
 ### 複数ファイルの一括読み込み: `.Files.Glob` + `.AsConfig`
 
