@@ -1,6 +1,0 @@
-source 'https://rubygems.org'
-
-# fluentd はベースイメージに含まれているため明示的には入れない
-# (bundle install時に既存のfluentdが検出される)
-gem 'test-unit', '~> 3.6'
-gem 'rake'
