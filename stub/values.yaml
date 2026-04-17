@@ -1,0 +1,33 @@
+# ============================================================
+# com-notifier-stub default values
+# ============================================================
+
+replicaCount: 1
+
+image:
+  repository: <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/com-notifier-stub
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Service の名前は FQDN に直結するため固定推奨
+# com-notifier-svc.gems-ip.svc.cluster.local
+service:
+  port: 80
+  targetPort: 8080
+  type: ClusterIP
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20

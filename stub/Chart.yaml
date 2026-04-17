@@ -1,0 +1,6 @@
+apiVersion: v2
+name: com-notifier-stub
+description: HTTP stub server — logs received headers/body and returns 202 accepted
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
