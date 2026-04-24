@@ -178,4 +178,4 @@ spec:
 
 理由:
 - セレクタ省略は Kubernetes の古い動作に依存しており、現在の推奨ではない。
-- 暗黙セレクタは可変ラベル(`version`, `chart`)を含むため、`helm upgrade` の 1 回目は通るが、2 回目以降で selector 不一致による immutable エラーが発生する。`labels.md` で詳しく扱うセレクタ不変原則を破る。
+- 暗黙セレクタは可変ラベル(`version`, `chart`)を含むため、`helm upgrade` の 1 回目は通るが、2 回目以降で selector 不一致による immutable エラーが発生する。

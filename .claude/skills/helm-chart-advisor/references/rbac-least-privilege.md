@@ -257,3 +257,4 @@ kind: RoleBinding
 - schema で拒否できない構造的ルール(特定の組み合わせでのみ発生する制約)は、テンプレート側の `fail` 関数で補完する。
 - `fail` によるエラーは `helm template` / `helm install` / `helm lint` で検出され、CI 段階で止められる。
 - schema とテンプレートの二段構えにすることで、どちらか一方をすり抜けるような記述を防ぐ。
+

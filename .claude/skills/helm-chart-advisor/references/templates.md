@@ -277,7 +277,7 @@ tolerations:
 
 ## 外部設定ファイルの読み込み
 
-`files/` ディレクトリ配下の外部設定ファイル(`rsyslog.conf`, `nginx.conf`, 初期化 SQL、TLS 証明書等)を ConfigMap / Secret に埋め込む際の読み込み方法は、ファイルの性質に応じて以下から選択する。`files/` ディレクトリ自体の配置ルールは `chart-files.md` を参照。
+`files/` ディレクトリ配下の外部設定ファイル(`rsyslog.conf`, `nginx.conf`, 初期化 SQL、TLS 証明書等)を ConfigMap / Secret に埋め込む際の読み込み方法は、ファイルの性質に応じて以下から選択する。
 
 ### 変数埋め込みが不要な場合: `.Files.Get`
 
