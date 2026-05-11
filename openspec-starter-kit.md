@@ -1,164 +1,117 @@
 # OpenSpec 運用スターターキット
 
-OpenSpec を導入したプロジェクトで、AI が常に参照する仕様を整備するための完成系セットです。
-3 つのファイル(`project.md`、`config.yaml`、プロンプトテンプレート)を組み合わせて運用します。
+OpenSpec を導入したプロジェクトで、AI コーディングアシスタントが
+「○○の機能は□□という仕様である」を常に参照できる状態を作るためのガイドです。
 
-## 全体像
+OpenSpec 1.0 以降の設計に準拠しています。
+
+## プロジェクト全体のファイル構成
+
+このスターターキットを使った OpenSpec プロジェクトは、次の構成になります。
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                    各ファイルの役割と関係                          │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  openspec/project.md     プロジェクト全体の不変的な文脈           │
-│  ├─ 役割: 「Kubernetes 上の Fluentd」など、毎回の前提情報         │
-│  └─ 効果: すべての /opsx-propose に自動的に注入される             │
-│                                                                  │
-│  openspec/config.yaml    spec 生成の構造的ルール                  │
-│  ├─ 役割: テンプレート構造、EARS、modal verb の使い分け          │
-│  └─ 効果: 出力される spec の構造を一貫させる                      │
-│                                                                  │
-│  プロンプトテンプレート   機能ごとの可変情報                       │
-│  ├─ 役割: その機能特有の目的、背景、制約                          │
-│  └─ 効果: AI に業務的な判断材料を渡す                             │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+your-project/                          ← プロジェクトのルートディレクトリ
+│
+├── openspec/                          ← OpenSpec が管理する領域
+│   ├── config.yaml                    ★ プロジェクト全体の規約と AI への指示
+│   │                                    (本スターターキットの「1」で作成)
+│   │
+│   ├── specs/                         ★ capability ごとの永続的な現状仕様
+│   │   ├── <capability-1>/
+│   │   │   └── spec.md                  運用しながら 1 つずつ蓄積していく
+│   │   ├── <capability-2>/
+│   │   │   └── spec.md
+│   │   └── ...                          書き方は feature-spec-template.md を参照
+│   │
+│   └── changes/                       ★ 進行中の変更と完了履歴
+│       ├── <change-name>/             (/opsx-propose で作成される)
+│       │   ├── proposal.md              なぜ・何を変えるか
+│       │   ├── design.md                技術的アプローチ
+│       │   ├── tasks.md                 実装チェックリスト
+│       │   └── specs/                   delta(ADDED/MODIFIED/REMOVED)
+│       └── archive/                   (/opsx-archive 後に移動)
+│           └── YYYY-MM-DD-<name>/
+│
+├── docs/                              ★ 補助ファイル(必要に応じて作成)
+│   ├── architecture/
+│   │   └── system-overview.md           全体システム構成図(Mermaid)
+│   ├── conventions.md                   コーディング規約の詳細
+│   ├── domain-glossary.md               ドメイン用語集
+│   └── references/                      リソース一覧(YAML)など
+│
+└── (実装ファイル)                      ← プロジェクト本体のコード
 ```
 
----
+### 各要素の役割
 
-## 1. `openspec/project.md`(プロジェクト全体の文脈)
-
-このファイルの内容は **すべての /opsx-propose 実行時に AI に注入** されます。
-書きすぎると逆に AI の注意が散漫になるので、「機能ごとには変わらないが、AI が知らないと正しい
-判断ができない情報」だけを書きます。
-
-### 完成系テンプレート
-
-```markdown
-# Project Overview
-
-このプロジェクトに関する基本情報。すべての OpenSpec ワークフローで参照される。
-
-## プロジェクトの目的
-
-<1〜3 文でプロジェクト全体の目的を書く>
-
-例:
-Kubernetes (EKS) 上で動作する syslog 処理パイプライン。
-複数の AWS アカウントからの syslog を集約し、フィルタリング・タグ付け後、
-ダウンストリームの HTTP エンドポイントおよび SQS に転送する。
-
-## 技術スタック
-
-<使用している主要技術とバージョンを列挙する>
-
-例:
-- **オーケストレーション**: Kubernetes (Amazon EKS 1.32)
-- **ログ収集**: rsyslog (DaemonSet)
-- **ログ処理**: Fluentd (DaemonSet、Ruby ベース、カスタムフィルタプラグイン含む)
-- **配布**: Helm 3.x、ECR (イメージ管理)、S3 (ルール配布)
-- **CI/CD**: AWS CodePipeline、CodeBuild
-- **IaC**: Terraform 1.x、Helm chart
-- **AWS サービス**: S3、SQS、IAM (Pod Identity)、Lambda、ALB
-
-## アーキテクチャ概要
-
-<システム全体のデータフローを記述する>
-
-例:
-データフロー:
-
-syslog (外部) → rsyslog (DaemonSet)
-              → Fluentd (DaemonSet、フィルタプラグイン適用)
-              → HTTP downstream または SQS
-
-主要コンポーネントの責務:
-- rsyslog: syslog 受信、Fluentd へのフォワード
-- Fluentd: タグルーティング、レコード変換、エンリッチメント
-- Fluentd プラグイン (Ruby):
-  - filter_rule_match: CSV ベースのルールマッチング
-  - timestamp_normalize: タイムスタンプ正規化
-  - utf8_encode: 文字エンコーディング正規化
-  - rule_match: パターンマッチング
-  - restore_pri: syslog priority 復元
-
-## コーディング規約
-
-<このプロジェクトで遵守すべきコーディング規約>
-
-例:
-### Ruby (Fluentd プラグイン)
-- bundler、rake、test-unit を使用
-- 単体テストは Docker イメージ内で実行(外部 gem アクセスなし)
-- ログ出力は構造化形式(JSON)で `$log` を使用
-
-### Helm chart
-- values.yaml に環境別の設定を分離
-- values.schema.json で必ずバリデーション
-- ConfigMap で外部設定を注入(コードにハードコードしない)
-
-### Terraform
-- modules/ 配下で再利用可能なリソースを定義
-- リソース命名規則: `<env>-<service>-<resource>`(例: prod-fluentd-sa)
-- 外部管理リソースは data ソースで参照
-
-## 不変の原則 (Constitution)
-
-<このプロジェクトで絶対に守るべき原則>
-
-例:
-- 設定はコードと分離する(in-memory ハードコード禁止)
-- すべての配布リソース(ルール、設定)は S3 を介する
-- Pod Identity を使用する(IRSA は使わない)
-- 障害発生時、メインパイプラインは MUST NOT 停止する
-- ログは構造化形式 (JSON) で出力する
-- カバレッジは単体テストで 80% 以上を維持する
-
-## 既存 Capability(順次 spec 化される)
-
-<OpenSpec で管理する予定の機能の一覧。spec 化が完了したら status を更新>
-
-| Capability ID | 状態 | 説明 |
+| 要素 | 役割 | 作成タイミング |
 |---|---|---|
-| csv-rule-distribution | 未起こし | S3 からの分類ルール配布 |
-| fluentd-tag-routing | 未起こし | タグベースのルーティング |
-| buffer-management | 未起こし | Fluentd のバッファ管理 |
-| timestamp-normalization | 未起こし | タイムスタンプ正規化 |
-| utf8-encoding | 未起こし | 文字エンコーディング正規化 |
+| `openspec/config.yaml` | プロジェクト全体の規約と AI への指示。`context` は全 artifact に毎回自動注入される | 初期セットアップ時 |
+| `openspec/specs/<capability>/spec.md` | 個別 capability の永続的な現状仕様 | 機能ごとに `/opsx-archive` 後に蓄積 |
+| `openspec/changes/<change-name>/` | 進行中の変更の作業領域 | `/opsx-propose` で自動作成 |
+| `openspec/changes/archive/` | 完了した変更の履歴 | `/opsx-archive` で自動移動 |
+| `docs/` 配下 | 補助ファイル。`openspec/config.yaml` の `context` から参照する | 必要に応じて手動作成 |
 
-(spec 化完了後は「spec 化済み」に更新する)
+### このスターターキットに含まれるファイル
 
-## 用語集
-
-<プロジェクト固有の用語の定義。業界共通用語は書かない>
-
-| 用語 | 定義 |
+| ファイル | 用途 |
 |---|---|
-| ルールテーブル | メモリ上に保持される {pattern, action} のマップ |
-| 配布元 CSV | S3 上の `s3://<bucket>/rules.csv` |
-| Pod Identity | EKS の IAM ロール委譲機構(EKS Pod Identity Agent 経由) |
-
-## 参考リンク
-
-- 内部設計ドキュメント: <Confluence などへのリンク>
-- ADR (Architecture Decision Records): `docs/adr/`
-- 過去の障害報告書: <wiki などへのリンク>
-```
-
-### project.md 作成時のコツ
-
-- **書きすぎない**:5〜10 個の主要技術と、簡潔なアーキテクチャ説明で十分。詳細は spec で書く
-- **書かないでよいもの**:タスクの進め方、コミットメッセージのルール(これらは AGENTS.md 側)
-- **更新タイミング**:大きな技術変更があったとき(主要バージョン更新、新サービス導入時)
-- **既存 Capability の表**:spec 化の進捗を可視化することで、AI も Takeshi さん自身も現状を把握できる
+| `openspec-starter-kit.md`(本ファイル) | 全体運用方針、`openspec/config.yaml` のテンプレート、プロンプトテンプレート |
+| `feature-spec-template.md` | `openspec/specs/<capability>/spec.md` を書く際の詳細テンプレート(EARS、Scenario、NFR の記法を含む) |
 
 ---
 
-## 2. `openspec/config.yaml`(spec 生成の構造的ルール)
+## OpenSpec 1.0+ の設計
 
-このファイルは **生成される spec の構造を一貫させる** ために使います。
-`context` フィールドは AI に毎回注入され、`rules` フィールドは artifact 種別ごとの追加制約を指定します。
+OpenSpec 1.0 では、AI への命令は次の 3 層から動的にアセンブルされます。
+
+```
+context (プロジェクト全体の文脈)
+  +
+rules  (artifact 別の制約)
+  +
+templates (出力構造)
+  ↓
+AI が CLI から受け取り、artifact を生成
+```
+
+これらはすべて `openspec/config.yaml` に集約され、AI が `/opsx-propose` を実行する
+たびに自動的に注入されます。1.0 以前にあった `project.md`、`AGENTS.md`、
+`CLAUDE.md`、`.cursorrules` などのツール固有設定ファイルは廃止されました。
+
+### 各ファイルの役割
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  ファイル                          書く内容          AI への伝達   │
+├────────────────────────────────────────────────────────────────────┤
+│  openspec/config.yaml              プロジェクト      毎回自動注入  │
+│   - context                        全体の不変的                    │
+│   - rules                          な文脈と規約                    │
+│                                                                    │
+│  openspec/specs/<capability>/      capability ごと   AI が該当変更 │
+│    spec.md                         の現状仕様        時に参照      │
+│                                                                    │
+│  openspec/changes/<change-name>/   変更の作業領域    変更作業中に  │
+│    (proposal、design、tasks、      (一時的)          参照          │
+│     delta specs)                                                   │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**役割分担の原則**:
+
+- プロジェクト全体に共通する話 → `openspec/config.yaml`
+- 個別 capability の振る舞い → 該当する `openspec/specs/<capability>/spec.md`
+- 変更ごとの設計判断 → 該当する change の `openspec/changes/<change-name>/design.md`
+
+役割を超えた情報を混入させると、AI が誤った文脈で判断する原因になります。
+
+---
+
+## 1. `openspec/config.yaml`
+
+プロジェクト全体の規約と AI への指示を集約する、唯一の中心ファイルです。
+`context` は **全 artifact 生成時に自動注入** されるため、簡潔さが重要です。
 
 ### 完成系テンプレート
 
@@ -167,26 +120,39 @@ schema: spec-driven
 
 context: |
   # 言語と表記ルール
-
   Language: Japanese
-
-  すべての成果物(proposal.md、spec.md、design.md、tasks.md)は日本語で
-  作成してください。ただし以下は英語のままにしてください:
-
+  すべての成果物は日本語で作成してください。
+  ただし以下は英語のまま使用してください:
   - "### Requirement:" "#### Scenario:" のセクション見出し
   - GIVEN / WHEN / THEN / AND(BDD のキーワード)
   - SHALL / MUST / SHOULD / MAY / MUST NOT(RFC 2119 の規範語)
   - When / While / If / Where / Otherwise(EARS のパターン識別子)
 
-  技術用語(Kubernetes、Helm、Fluentd、Pod、Service、Capability など)も
-  英語のまま使用してください。
+  # プロジェクト定義
+  <プロジェクト全体の目的を 1〜2 文で記述>
 
-  # 共通の前提
+  # 技術スタック
+  - 言語: <例: TypeScript 5.3、Go 1.22>
+  - ランタイム: <例: Node.js 24 LTS>
+  - 主要フレームワーク: <例: NestJS 10、FastAPI 0.115>
+  - インフラ: <例: Kubernetes (Amazon EKS 1.32)、Terraform 1.7>
+  - データストア: <例: PostgreSQL 16、Redis 7>
 
+  # 不変の原則(最重要のみ)
+  - 設定はコードと分離する
+  - 障害時もメインの処理パイプラインは停止しない
+  - すべての変更は監視・観測可能であること
+
+  # 詳細情報の参照先
+  - 全体システム構成: docs/architecture/system-overview.md
+  - コーディング規約: docs/conventions.md
+  - ドメイン用語: docs/domain-glossary.md
+
+  # 共通の品質要求
   - すべての requirement は測定可能・検証可能な形式で記述する
-  - 数値が必要な箇所では具体的な値を含める(「速い」「使いやすい」は不可)
+  - 数値が必要な箇所では具体的な値を含める
   - 既存実装と矛盾する spec を作らない(矛盾する場合は MODIFIED で明示)
-  - 既存の openspec/specs/ 配下の spec を参考にして、同じスタイルで生成する
+  - 既存の openspec/specs/ 配下の spec を参考にして同じスタイルで生成する
 
 rules:
   proposal:
@@ -204,15 +170,19 @@ rules:
     # 本文構造
     - "## 目的" には 2〜4 文で「なぜこの機能が存在するか」を書く(What ではなく Why)
     - "## スコープ" には対象範囲と対象外を両方書く
-    - 機能要件は EARS 形式で書く(Ubiquitous、Event-Driven、State-Driven、Optional、Unwanted Behavior)
+    - 機能要件は EARS 形式で書く
     - SHALL / MUST / SHOULD / MAY を RFC 2119 に従って使い分ける
     - 各 Requirement には Scenario を 1 つ以上含める
     - 複雑な要件には #### Rationale セクションで根拠を書く
-    - 非機能要件は性能、信頼性、セキュリティ、観測性、保守性のカテゴリで分類する
+    - 非機能要件は性能・信頼性・セキュリティ・観測性・保守性のカテゴリで分類する
     - すべての非機能要件には測定可能な数値を含める
     - 外部システムとの I/O がある場合は "## インターフェース" セクションを書く
     - "## 制約事項" には理由も併記する
     - "## 対象外" には「やらないこと」とその理由を書く
+
+    # 構成情報の表現
+    - データフローや状態遷移がある場合、spec.md 内に Mermaid 図で記述する
+    - capability のスコープを適切に小さく保ち、spec.md が肥大化しないようにする
 
   design:
     - 採用した技術の選定理由を必ず明記する
@@ -220,7 +190,7 @@ rules:
     - 既存アーキテクチャとの整合性を確認するセクションを含める
     - 障害シナリオと対処方法を含める
     - 監視・運用観点を含める(メトリクス、アラート、ログ)
-    - 複雑な処理フローにはシーケンス図を含める(Mermaid 形式)
+    - 複雑な処理フローには Mermaid 形式でシーケンス図を含める
 
   tasks:
     - 各タスクは独立に実装・テスト可能な単位に分割する
@@ -230,19 +200,66 @@ rules:
     - 影響の大きい変更(IAM、本番設定など)は実装前にユーザー確認を求めるよう明記する
 ```
 
-### config.yaml 作成時のコツ
+### 補助ファイルの配置場所
 
-- **`context` は技術非依存の指示**:言語、表記ルール、品質基準など
-- **`rules` は artifact 種別ごとの指示**:proposal は影響範囲、spec は構造、design は技術判断、tasks は分割粒度
-- **検証フェーズで育てる**:最初は最小構成で開始し、AI の出力をレビューして「毎回修正している項目」を rules に追加する
-- **冗長な指示は避ける**:同じことを複数箇所に書かない(優先順位が AI に伝わりにくくなる)
+`config.yaml` の `context` から参照する補助ファイルは、内容に応じて適切な
+フォーマットで `docs/` 配下に配置します。
+
+| 情報の種類 | 推奨フォーマット | 配置場所の例 |
+|---|---|---|
+| 全体システム構成図、横断的なデータフロー | Mermaid | `docs/architecture/system-overview.md` |
+| プロジェクト全体のコーディング規約の詳細 | Markdown | `docs/conventions.md` |
+| ドメイン用語集 | Markdown(表形式) | `docs/domain-glossary.md` |
+| AWS / K8s リソースの一覧 | YAML | `docs/references/resources.yaml` |
+| 既存の Visio / draw.io 図 | 画像 + テキスト説明 | `docs/diagrams/*.png` |
+
+これらのファイルは `config.yaml` の `context` から **参照先として明示** することで、
+AI が変更内容に応じて読みに行きます。
 
 ---
 
-## 3. プロンプトテンプレート(機能ごとの可変情報)
+## 2. `openspec/specs/<capability>/spec.md`
 
-`/opsx-propose` を実行する際のプロンプトの完成系です。
-新規機能追加、既存機能修正、バグ修正で微妙にフォーマットが異なります。
+各 capability の **現状の振る舞い** を記述する場所です。データフロー、
+処理シーケンス、コンポーネント関係など、その機能に関わるすべての情報を含めます。
+
+spec.md の詳細なテンプレートは `feature-spec-template.md` を参照してください
+(EARS 形式、Scenario、Rationale、NFR の記法を含む)。
+
+### capability の単位
+
+capability(機能領域)の単位を **適切に小さく保つ** ことが、spec.md の品質を
+維持するコツです。目安:
+
+- 1 つの spec.md が 1 つの明確な責務を持つ
+- データフローを Mermaid 図 1 枚で表現できる粒度
+- 変更時に関連する Requirement が 5〜15 個程度
+
+capability が大きすぎると、spec.md が肥大化して AI の理解が散漫になり、
+小さすぎると capability 間の依存関係が複雑になります。
+
+### spec.md に書く内容
+
+- frontmatter(識別情報、関係性)
+- 目的(その capability が存在する理由)
+- スコープ(対象範囲と対象外)
+- 機能要件(EARS 形式の Requirement と Scenario)
+- 非機能要件(性能、信頼性など)
+- インターフェース(外部システムとの I/O)
+- データモデル(永続化するデータがある場合)
+- 制約事項、前提条件、依存関係
+- データフロー図(Mermaid で記述)
+- 参考資料(関連 ADR、Issue)
+
+データフローや状態遷移は、spec.md 内に Mermaid で直接記述します。
+capability の単位を適切に保つことで、外部ファイルへの分離は通常不要です。
+
+---
+
+## 3. プロンプトテンプレート
+
+`/opsx-propose` を実行する際のプロンプトです。状況に応じて 5 つのパターンを
+使い分けます。
 
 ### パターン A:新規機能追加
 
@@ -286,8 +303,7 @@ rules:
 <変更で何を達成したいか、2〜4 文で記述>
 
 ## 重要な注意:OpenSpec 導入直後
-このプロジェクトは OpenSpec を導入したばかりで、対象 capability
-<capability-id> の spec はまだ openspec/specs/ に存在しません。
+対象 capability <capability-id> の spec はまだ openspec/specs/ に存在しません。
 
 したがって以下の順序で進めてください:
 
@@ -312,7 +328,6 @@ rules:
 
 ## 重要な制約
 - <絶対に守るべき制約>
-- <避けるべき技術選択肢>
 
 ## 期待する変更後の挙動
 - <変更後にこうなってほしい、という挙動>
@@ -396,12 +411,11 @@ rules:
 ## 関連する既存実装
 - <ファイルパス1>
 - <ファイルパス2>
-- <ファイルパス3>
 
 ## 指示
 1. 上記の既存実装を精読する
 2. 現状の挙動を ADDED Requirements として整理する
-3. 既存実装のテストファイル(<テストファイルパス>)も参考にする
+3. データフローや処理シーケンスがあれば spec.md 内に Mermaid で記述する
 4. tasks.md は「ドキュメント作成のみ、実装変更なし」と明記する
 5. design.md は既存実装の概要を簡潔に記述する
 
@@ -413,66 +427,90 @@ rules:
 - 過去の障害報告: <あれば>
 ```
 
----
+### パターンの使い分け
 
-## プロンプトテンプレートの使い分け早見表
-
-| 状況 | 該当パターン | 該当 spec の有無 |
-|---|---|---|
-| 全く新しい機能を追加 | A | 該当なし |
-| 既存機能を変更したいが spec がない | B | なし |
-| 既存機能を変更、spec は存在 | C | あり |
-| バグ修正(spec の有無問わず) | D | 該当部分は B または C のルールに従う |
-| 既存機能を spec 化するだけ | E | なし(これから作る) |
+| 状況 | 使用パターン |
+|---|---|
+| 全く新しい機能を追加 | A |
+| 既存機能を変更したいが spec がない | B |
+| 既存機能を変更、spec は存在 | C |
+| バグ修正 | D(該当部分は B または C のルールに従う) |
+| 既存機能を spec 化するだけ | E |
 
 ---
 
-## 運用フロー(ブラッシュアップの進め方)
+## 運用フロー
 
-最初の数機能では「config の充実」と「プロンプトの最適化」を並行して進めます。
+### フェーズ 1:初期セットアップ
 
-### フェーズ 1:初期セットアップ(1 日程度)
-
-1. `project.md` を上記テンプレートで作成
+1. `openspec init` で OpenSpec を初期化(`--tools` で使用する AI ツールを指定)
 2. `config.yaml` を上記テンプレートで作成
-3. プロンプトテンプレートを手元に保存(VS Code Snippets 等に登録すると便利)
+3. 必要なら `docs/architecture/system-overview.md` などの補助ファイルを最小限作成
+4. プロンプトテンプレートを手元に保存
 
-### フェーズ 2:最初の 1 機能で「お手本」を作る(数時間)
+補助ファイルは最初から完璧を目指さず、運用しながら追記します。
+
+### フェーズ 2:最初の 1 機能で「お手本」を作る
 
 1. 一番シンプルで影響範囲の小さい既存機能を 1 つ選ぶ
 2. パターン E(spec 化のみ)で `/opsx-propose` を実行
 3. 生成された spec をレビュー、必要に応じて手動修正
-4. `/opsx-apply` → `/opsx-archive` で永続化
-5. 完成した `openspec/specs/<capability>/spec.md` を Takeshi さんが満足する品質に整える
+4. `/opsx-apply` → `/opsx-archive` で `openspec/specs/<capability>/spec.md` に永続化
 
-これが今後の AI の参考データになります。最初は時間をかけて整える価値があります。
+この最初の spec が、以降の `/opsx-propose` で AI が参照する「お手本」になります。
+時間をかけて品質を整える価値があります。
 
-### フェーズ 3:検証サイクル(3〜5 機能、数日〜1 週間)
+### フェーズ 3:検証サイクル
 
 各機能で次のループを回します:
 
 1. 適切なパターンを選んで `/opsx-propose` 実行
 2. 生成された artifact をレビュー
-3. 不満な点があれば、原因を切り分け:
-   - **構造的な問題(EARS 形式が崩れている、Rationale がない等)**:
-     → `config.yaml` の `rules.specs` に追加
-   - **プロジェクト固有の前提が抜けている**:
-     → `project.md` に追加
-   - **その機能固有の情報が伝わっていない**:
-     → プロンプトテンプレートを充実
+3. 不満な点があれば、原因に応じた場所に昇格:
+
+| 不満の種類 | 昇格先 |
+|---|---|
+| 構造的な問題(EARS 形式が崩れる、Rationale がない) | `openspec/config.yaml` の `rules.specs` |
+| 出力言語、表記ルールのブレ | `openspec/config.yaml` の `context` |
+| プロジェクト全体の前提が抜けている | `openspec/config.yaml` の `context` または `docs/` 配下 |
+| その capability の振る舞いの認識ズレ | 該当 `openspec/specs/<capability>/spec.md` |
+| その機能固有の情報が伝わっていない | プロンプトテンプレート |
+
 4. 修正を反映した状態で、次の機能で再度試行
 
-### フェーズ 4:定常運用(機能 5〜10 個目以降)
+### フェーズ 4:定常運用
 
-- `project.md` と `config.yaml` がほぼ安定
-- プロンプトは「目的」「対象 Capability」「変更内容」程度の最小構成で済むようになる
+機能 5〜10 個目以降になると:
+
+- `config.yaml` がほぼ安定
+- プロンプトは目的・対象 Capability・変更内容程度の最小構成で済む
 - AI の出力品質が高く、レビューでの修正がほぼ不要に
 
 ---
 
-## 評価指標(ブラッシュアップが進んだかの判断材料)
+## OpenSpec の基本ワークフロー
 
-以下が改善していれば、ブラッシュアップが進んでいるサインです:
+`/opsx-propose` 実行後の流れ:
+
+```
+1. /opsx-propose <change-name>  変更を提案、計画 artifact を一括生成
+   ↓
+   (生成された artifact をレビュー、必要なら修正)
+   ↓
+2. /opsx-apply                  tasks.md に従って実装
+   ↓
+3. /opsx-archive                完了した change を specs/ にマージ
+```
+
+各ステップでファイルを直接編集できる柔軟性があり、提案 → 実装 → アーカイブの
+順序を厳格に守る必要はありません。気付きがあればどの段階でも前の artifact に
+戻って修正できます。
+
+---
+
+## 評価指標
+
+ブラッシュアップが進んだかの判断材料:
 
 | 指標 | 初期 | 定常運用後 |
 |---|---|---|
@@ -487,60 +525,88 @@ rules:
 
 ## トラブルシューティング
 
-### Q1:生成された spec が config.yaml の指示に従っていない
+### Q1:生成された spec が config.yaml の指示に従わない
 
-**対処**:
-
-1. `config.yaml` の `rules.specs` に書いた項目が、抽象的すぎないか確認
-   - 悪い例: "適切に書く"
-   - 良い例: "各 Requirement に Scenario を 1 つ以上含める"
-2. 矛盾する指示がないか確認(複数箇所で違うことを言っていないか)
+1. `config.yaml` の `rules.specs` の項目が抽象的すぎないか確認する
+   - 悪い例: 「適切に書く」
+   - 良い例: 「各 Requirement に Scenario を 1 つ以上含める」
+2. 矛盾する指示がないか確認する
 3. それでも改善しない場合、その指示を `context` フィールドに移動する
-   (context の方が優先度が高いと AI が認識する傾向がある)
 
-### Q2:プロンプトを充実させても AI の出力品質が上がらない
+### Q2:プロンプトを充実させても出力品質が上がらない
 
-**対処**:
-
-1. プロンプトに書いた情報が `project.md` と重複していないか確認
-2. プロンプトが長すぎないか確認(300 行を超えると AI の注意が散漫になる)
-3. 「AI が知らないと判断できない情報」だけに絞れているか確認
-   - 「これは AI でも常識的に分かるだろう」と思える情報は削除
-4. 「お手本」となる既存 spec があるか確認
-   (`openspec/specs/` に 1 つでも完成度の高い spec があれば、AI はそれを真似る)
+1. プロンプトに書いた情報が `config.yaml` の `context` と重複していないか確認する
+2. プロンプトが長すぎないか確認する(300 行を超えると AI の注意が散漫になる)
+3. 「AI が知らないと判断できない情報」だけに絞れているか確認する
+4. 「お手本」となる既存 spec があるか確認する
 
 ### Q3:既存実装を読まずに想像で spec を書く
 
-**対処**:
-
-1. プロンプトに「上記の既存実装を **精読してから** 作成してください」と明示
+1. プロンプトに「既存実装を **精読してから** 作成してください」と明示する
 2. 関連ファイルのパスをプロンプトに具体的に列挙する
-3. AI ツールがファイル読み込み機能を持っているか確認(Copilot Chat は `@workspace`、Claude Code は自動)
-4. それでも不十分なら、一度 `/opsx-explore` で既存実装の調査を依頼してから `/opsx-propose` に進む
+3. AI ツールがファイル読み込み機能を持っているか確認する
+4. それでも不十分なら、一度 `/opsx-explore` で調査を依頼してから `/opsx-propose` に進む
 
-### Q4:同じ修正を毎回手動でしている
+### Q4:生成された spec に他機能の話が混ざる
 
-**対処**:
+これは capability の境界が AI に伝わっていないサインです。
 
-これは config.yaml に昇格すべきサインです。次のいずれかに追加します:
+1. プロンプトの「対象 Capability」を明示する
+2. 既存の spec.md がある場合、frontmatter の `depends_on` / `consumed_by` で
+   関係性を明示する
+3. `/opsx-explore` で「この変更が影響する capability の範囲」を先に確認してから
+   `/opsx-propose` に進む
 
-- 構造的な修正 → `rules.specs` または `rules.proposal` 等
-- プロジェクト固有の前提 → `project.md`
-- 表記ルール → `context`
+### Q5:同じ修正を毎回手動でしている
+
+修正の種類に応じて昇格します:
+
+| 修正の種類 | 昇格先 |
+|---|---|
+| 構造的な修正 | `openspec/config.yaml` の `rules.specs` |
+| プロジェクト全体の前提 | `openspec/config.yaml` の `context` |
+| 表記ルール、言語 | `openspec/config.yaml` の `context` |
+| 特定 capability の振る舞いの認識ミス | 該当 `openspec/specs/<capability>/spec.md` |
+
+### Q6:`context` が 50KB の上限に近づいた
+
+`context` には 50KB(UTF-8 バイト数)の上限があります。日本語で約 16,000 文字が目安です。
+
+1. 詳細な情報は `docs/` 配下の補助ファイルに切り出す
+2. `context` には参照先を明示するだけにする
+3. 例: 「コーディング規約の詳細は `docs/conventions.md` を参照」
 
 ---
 
 ## まとめ
 
-OpenSpec 導入時のスターターキットは以下の 3 点セットです:
+OpenSpec 1.0+ でのスターターキットは次の構成です:
 
-1. **`openspec/project.md`**:プロジェクト全体の不変的な文脈(技術スタック、原則、用語)
-2. **`openspec/config.yaml`**:spec 生成の構造的ルール(言語、EARS、各 artifact の要件)
-3. **プロンプトテンプレート**:機能ごとの可変情報(目的、背景、影響範囲)
+| ファイル | 役割 |
+|---|---|
+| `openspec/config.yaml` | プロジェクト全体の規約と AI への指示(毎回自動注入) |
+| `openspec/specs/<capability>/spec.md` | 個別 capability の現状仕様(運用しながら蓄積) |
+| `feature-spec-template.md` | spec.md を書く際の詳細テンプレート |
+| プロンプトテンプレート | 機能ごとの可変情報 |
+| `docs/` 配下の補助ファイル | 詳細な規約、構成図、ドメイン用語(必要に応じて) |
 
-これら 3 つを最初に整え、運用しながらブラッシュアップしていくことで、Takeshi さんの当初の目的
-「○○の機能は□□という仕様である」を AI が常に参照する状態が、段階的に実現されます。
+**最も重要な原則**:
 
-最初は手作業が多く感じるかもしれませんが、5〜10 機能を経るころには `project.md` と
-`config.yaml` がほぼ安定し、プロンプトも最小限で済むようになります。
-最初の 1〜2 機能だけは時間をかけて「お手本」となる品質に整える価値があります。
+- プロジェクト全体の話だけが `openspec/config.yaml` に入る
+- 個別機能の話はすべて該当 `openspec/specs/<capability>/spec.md` に入る
+- 両者を混同しない
+
+これを守ることで、AI が誤った文脈で判断することを防ぎます。
+
+---
+
+## 公式情報の出典
+
+このスターターキットは以下の公式情報に基づいています:
+
+- [OpenSpec - Getting Started](https://github.com/Fission-AI/OpenSpec/blob/main/docs/getting-started.md)
+- [OpenSpec - Customization](https://github.com/Fission-AI/OpenSpec/blob/main/docs/customization.md)
+- [OpenSpec - Commands](https://github.com/Fission-AI/OpenSpec/blob/main/docs/commands.md)
+- [OpenSpec - Concepts](https://github.com/Fission-AI/OpenSpec/blob/main/docs/concepts.md)
+- [OpenSpec - Migration Guide](https://github.com/Fission-AI/OpenSpec/blob/main/docs/migration-guide.md)
+- [OpenSpec 1.0 Release Notes](https://github.com/Fission-AI/OpenSpec/releases/tag/v1.0.0)

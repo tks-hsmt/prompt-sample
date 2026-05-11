@@ -2,26 +2,39 @@ schema: spec-driven
 
 context: |
   # 言語と表記ルール
-
   Language: Japanese
-
-  すべての成果物(proposal.md、spec.md、design.md、tasks.md)は日本語で
-  作成してください。ただし以下は英語のままにしてください:
-
+  すべての成果物は日本語で作成してください。
+  ただし以下は英語のまま使用してください:
   - "### Requirement:" "#### Scenario:" のセクション見出し
   - GIVEN / WHEN / THEN / AND(BDD のキーワード)
   - SHALL / MUST / SHOULD / MAY / MUST NOT(RFC 2119 の規範語)
   - When / While / If / Where / Otherwise(EARS のパターン識別子)
 
-  技術用語(Kubernetes、Helm、Fluentd、Pod、Service、Capability など)も
-  英語のまま使用してください。
+  # プロジェクト定義
+  <プロジェクト全体の目的を 1〜2 文で記述>
 
-  # 共通の前提
+  # 技術スタック
+  - 言語: <例: TypeScript 5.3、Go 1.22>
+  - ランタイム: <例: Node.js 24 LTS>
+  - 主要フレームワーク: <例: NestJS 10、FastAPI 0.115>
+  - インフラ: <例: Kubernetes (Amazon EKS 1.32)、Terraform 1.7>
+  - データストア: <例: PostgreSQL 16、Redis 7>
 
+  # 不変の原則(最重要のみ)
+  - <例: 設定はコードと分離する>
+  - <例: 障害時もメインの処理パイプラインは停止しない>
+  - <例: すべての変更は監視・観測可能であること>
+
+  # 詳細情報の参照先
+  - 全体システム構成: <例: docs/architecture/system-overview.md>
+  - コーディング規約: <例: docs/conventions.md>
+  - ドメイン用語: <例: docs/domain-glossary.md>
+
+  # 共通の品質要求
   - すべての requirement は測定可能・検証可能な形式で記述する
-  - 数値が必要な箇所では具体的な値を含める(「速い」「使いやすい」は不可)
+  - 数値が必要な箇所では具体的な値を含める
   - 既存実装と矛盾する spec を作らない(矛盾する場合は MODIFIED で明示)
-  - 既存の openspec/specs/ 配下の spec を参考にして、同じスタイルで生成する
+  - 既存の openspec/specs/ 配下の spec を参考にして同じスタイルで生成する
 
 rules:
   proposal:
@@ -39,15 +52,19 @@ rules:
     # 本文構造
     - "## 目的" には 2〜4 文で「なぜこの機能が存在するか」を書く(What ではなく Why)
     - "## スコープ" には対象範囲と対象外を両方書く
-    - 機能要件は EARS 形式で書く(Ubiquitous、Event-Driven、State-Driven、Optional、Unwanted Behavior)
+    - 機能要件は EARS 形式で書く
     - SHALL / MUST / SHOULD / MAY を RFC 2119 に従って使い分ける
     - 各 Requirement には Scenario を 1 つ以上含める
     - 複雑な要件には #### Rationale セクションで根拠を書く
-    - 非機能要件は性能、信頼性、セキュリティ、観測性、保守性のカテゴリで分類する
+    - 非機能要件は性能・信頼性・セキュリティ・観測性・保守性のカテゴリで分類する
     - すべての非機能要件には測定可能な数値を含める
     - 外部システムとの I/O がある場合は "## インターフェース" セクションを書く
     - "## 制約事項" には理由も併記する
     - "## 対象外" には「やらないこと」とその理由を書く
+
+    # 構成情報の表現
+    - データフローや状態遷移がある場合、spec.md 内に Mermaid 図で記述する
+    - capability のスコープを適切に小さく保ち、spec.md が肥大化しないようにする
 
   design:
     - 採用した技術の選定理由を必ず明記する
@@ -55,7 +72,7 @@ rules:
     - 既存アーキテクチャとの整合性を確認するセクションを含める
     - 障害シナリオと対処方法を含める
     - 監視・運用観点を含める(メトリクス、アラート、ログ)
-    - 複雑な処理フローにはシーケンス図を含める(Mermaid 形式)
+    - 複雑な処理フローには Mermaid 形式でシーケンス図を含める
 
   tasks:
     - 各タスクは独立に実装・テスト可能な単位に分割する
