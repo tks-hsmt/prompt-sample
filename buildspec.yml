@@ -1,0 +1,71 @@
+version: 0.2
+
+# =============================================================================
+# CodeBuild buildspec: CloudWatch Observability の helm デプロイ
+#
+#   所有: このパイプラインが Helm リリース(amazon-cloudwatch)を所有する。
+#         Terraform 側は helm_release を持たないこと(競合回避)。
+#
+#   values の重ね順(後勝ち):
+#     1. base-values.yaml   … リポジトリ管理(安定部分: clusterName/region/agent 等)
+#                             ※ application-log.conf はここに置かない(filter 側と競合するため)
+#     2. filter-values.yaml … S3 管理(可変部分: application-log.conf 全文 + grep)
+#
+#   フィルタ更新フロー:
+#     S3 の filter-values.yaml を更新 → 本 CodeBuild を実行 → helm upgrade で反映
+# =============================================================================
+
+env:
+  variables:
+    HELM_VERSION: "v3.16.3"      # 固定推奨。最新は helm のリリースで確認すること
+    KUBECTL_VERSION: "v1.30.0"   # クラスタの k8s バージョンに合わせる
+
+phases:
+  install:
+    commands:
+      # helm
+      - curl -fsSL -o helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+      - tar -xzf helm.tgz && mv linux-amd64/helm /usr/local/bin/helm && rm -rf helm.tgz linux-amd64
+      # kubectl
+      - curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+      - chmod +x /usr/local/bin/kubectl
+
+  pre_build:
+    commands:
+      - aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+      - helm repo add aws-observability https://aws-observability.github.io/helm-charts
+      - helm repo update aws-observability
+      # 可変部分(application-log.conf 全文 + grep)を S3 から取得
+      - aws s3 cp "s3://${VALUES_BUCKET}/${FILTER_VALUES_KEY}" ./filter-values.yaml
+
+  build:
+    commands:
+      # Helm リリースの作成/更新(後勝ちで filter が application-log.conf を上書き)
+      - |
+        helm upgrade --install amazon-cloudwatch \
+          aws-observability/amazon-cloudwatch-observability \
+          --namespace amazon-cloudwatch --create-namespace \
+          --set clusterName="$CLUSTER_NAME" \
+          --set region="$AWS_REGION" \
+          -f base-values.yaml \
+          -f filter-values.yaml \
+          --wait --timeout 10m
+
+      # Hybrid ノード必須: agent に RUN_WITH_IRSA(冪等。既に有れば何もしない)
+      # ※ values の agent.env で渡せるなら本パッチは不要にできるが、ここでは
+      #   公式が確実に示す kubectl patch を採用(values での agent.env パスは版依存)。
+      - |
+        kubectl -n amazon-cloudwatch wait --for=create \
+          amazoncloudwatchagents/cloudwatch-agent --timeout=120s
+        EXISTS=$(kubectl -n amazon-cloudwatch get amazoncloudwatchagents cloudwatch-agent \
+          -o jsonpath='{.spec.env[*].name}' | tr ' ' '\n' | grep -cx RUN_WITH_IRSA || true)
+        if [ "$EXISTS" -eq 0 ]; then
+          kubectl patch amazoncloudwatchagents cloudwatch-agent \
+            -n amazon-cloudwatch --type=json \
+            -p '[{"op":"add","path":"/spec/env/-","value":{"name":"RUN_WITH_IRSA","value":"True"}}]'
+        fi
+
+  post_build:
+    commands:
+      # 反映確認: grep が ConfigMap に入っているか
+      - kubectl -n amazon-cloudwatch get configmap fluent-bit-config -o jsonpath='{.data.application-log\.conf}' | grep -A2 grep || true
