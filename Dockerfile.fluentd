@@ -1,0 +1,16 @@
+FROM fluent/fluentd:v1.19.3-debian
+
+USER root
+
+RUN buildDeps="make gcc g++ libc-dev" && \
+    export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends $buildDeps && \
+    gem install json -v 2.19.9 --no-document && \
+    gem uninstall json -v 2.13.2 --executables --force && \
+    apt-get purge -y --auto-remove \
+        -o APT::AutoRemove::RecommendsImportant=false \
+        $buildDeps && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/local/bundle/cache/*.gem
+
+USER fluent
