@@ -1,0 +1,10 @@
+FROM rsyslog/rsyslog:2026-04
+
+USER root
+
+RUN apt-get update && \
+    apt-get install -y --only-upgrade \
+      libssl3t64 openssl libgnutls30t64 libcurl4t64 curl logrotate && \
+    rm -rf /var/lib/apt/lists/*
+
+USER syslog:adm
