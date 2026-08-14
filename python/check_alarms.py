@@ -17,7 +17,9 @@ ALARM_PREFIX を設定して自チームのアラームだけに絞ること。
 
 from __future__ import annotations
 
-from common import RegionConfig, check_handler, client
+from aws import client
+from config import RegionConfig
+from handlers import check_handler
 
 
 @check_handler("alarms")
@@ -27,6 +29,10 @@ def handler(cfg: RegionConfig) -> dict:
     if cfg.alarm_prefix:
         kwargs["AlarmNamePrefix"] = cfg.alarm_prefix
 
+    # ページネータを使う。既定では 100 件で打ち切られ、無言で
+    # 切り捨てられるため。
+    paginator = cw.get_paginator("describe_alarms")
     in_alarm = [alarm["AlarmName"]
-                for alarm in cw.describe_alarms(**kwargs).get("MetricAlarms", [])]
+                for page in paginator.paginate(**kwargs)
+                for alarm in page["MetricAlarms"]]
     return {"in_alarm": in_alarm} if in_alarm else {}

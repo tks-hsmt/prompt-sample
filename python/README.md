@@ -138,8 +138,16 @@ resource "aws_lambda_function" "check_nlb" {
 サブネット・セキュリティグループ）。イメージには AWS CLI と
 `kubernetes` パッケージを同梱している。
 
-ログは `common.py` の JSON フォーマッタで構造化する。ランタイムのログ形式
+ログは `logging_json.py` の JSON フォーマッタで構造化する。ランタイムのログ形式
 設定にも Powertools にも依存しない。
+
+**ルートロガーに設定している**ため、botocore / urllib3 / kubernetes など
+ライブラリのログも同じ JSON 形式で出る。CloudWatch Logs Insights で JSON
+フィールドを条件にクエリしたときに、ライブラリのログ行だけパースできない
+という事態を避けるため。ライブラリのログレベルは既定で `WARNING`
+（`LIBRARY_LOG_LEVEL`）、アプリは `INFO`（`LOG_LEVEL`）。
+
+`logger.info("msg", extra={"bucket": "b1"})` の独自フィールドも JSON に出る。
 
 ## IAM（リソース単位）
 
@@ -148,7 +156,11 @@ resource "aws_lambda_function" "check_nlb" {
 
 | 関数 | 必要なアクション | Resource |
 |---|---|---|
-| dr-apigw | `apigateway:GET` `PATCH` `POST` `UpdateRestApiPolicy` | **両リージョン**の `/restapis/<id>` と配下 |
+| dr-apigw | `apigateway:GET` `apigateway:PATCH` | **両リージョン**の `/restapis/<id>/stages/<stage>` |
+
+東京・大阪は同一 AWS アカウント。両リージョンのリソースを同じ実行ロールで
+操作できることを前提にしている。
+
 | dr-scheduler | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **両リージョン**の自チームグループのみ／スケジュール実行ロール |
 | dr-s3-replication | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **両リージョン**のバケット／レプリケーションロール |
 | dr-check-apigw | `apigateway:GET` | SELF の `/restapis/<id>/stages/<stage>` |
@@ -274,6 +286,49 @@ Activate(self): scheduler -> apigw       # 失敗は未捕捉 = 停止
 の対象は「ルールが Enabled になった後に書かれたオブジェクト」だけなので、
 開放が先だと取りこぼしが発生し、Batch Replication での追い付きが必要になる。
 
+## API Gateway の閉塞方式
+
+**ステージのスロットリングを 0 にする方式**を採る。
+
+    閉塞: rateLimit=0 / burstLimit=0  -> 全リクエストが 429
+    開放: 環境変数（または引数）の値に戻す
+
+復元値は `SELF_THROTTLE_RATE` / `SELF_THROTTLE_BURST`（既定 10000 / 5000）。
+Step Functions から `{"throttle": {"rate": ..., "burst": ...}}` で上書きできる。
+
+### リソースポリシー Deny 方式を採らない理由
+
+1. リソースポリシーの更新は再デプロイしないと反映されず 2 手になる
+2. `/policy` への patch は `op:replace` のみ（`op:add` / `op:remove` は
+   非サポート）で、Statement 単位の更新ができない。既存ポリシーに IP 制限等が
+   あると閉塞のたびに壊す危険がある
+3. 旧アクティブ側の閉塞はリージョン障害中に実行できない可能性があり、構造的に
+   ベストエフォート。遮断機構だけを「保証された」ものにする必然性がない
+
+スロットリングは公式に「ベストエフォートで適用され、保証された上限ではなく
+目標値」とされている。理論上わずかな漏れの可能性は残るが、3 の理由から許容する。
+
+### 前提と副作用
+
+現在ステージには明示的なスロットリング設定が無く、`get-stage` に出ている
+10000 / 5000 は**アカウントのデフォルト値**（10,000 RPS / バースト 5,000）が
+表示されているだけ。
+
+- スロットリング設定は `op:remove` が非サポートのため、一度書き込むと
+  「未設定」には戻せない。ただし復元先がデフォルトと同値なので実害はない
+- **明示設定後は、アカウントのクォータを引き上げてもこのステージは環境変数の
+  値のままになる。** 引き上げ時はここも上げること
+- この副作用は「明示設定が存在すること」から生じるもので、Terraform で
+  管理するかどうかとは無関係。Lambda が復元時に書き込む以上、どちらにしても
+  発生する
+
+### Terraform で管理しない理由
+
+`aws_api_gateway_method_settings` で管理することもできるが、Lambda が値を
+書き換えるためドリフト対策（`ignore_changes`）が必要になる。上記の副作用は
+Terraform 管理の有無で変わらないため、管理コストが増えるだけで得るものがない。
+復元値は Lambda の環境変数だけで持つ。
+
 ## S3 レプリケーション: 案 A / 案 B
 
 未確定のため両方に対応できる形にしてある。
@@ -381,10 +436,30 @@ Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグル�
   VPC・サブネット・セキュリティグループに配置する（既存 Lambda と同じ設定）
 - 実行ロールを EKS アクセスエントリで view 相当にマッピングする
 
-## タイムアウト
+## タイムアウト（外部通信すべてに設定）
 
-いずれも待機しない設計なので 30〜60 秒で十分。
-長いタイムアウトは、API が応答しない状態で無駄に待つだけになる。
+応答しない相手を待ち続けて RTO を消費しないよう、外部と通信するすべての
+呼び出しにタイムアウトを設定している。
+
+| 呼び出し | 設定 | 場所 |
+|---|---|---|
+| AWS API（boto3） | connect 3 秒 / read 5 秒、botocore リトライ 1 回（合計 2 試行） | `common.BOTO_CONFIG` |
+| Kubernetes API | connect 3 秒 / read 10 秒 | `check_workload.K8S_TIMEOUT` |
+| `aws eks update-kubeconfig` | 15 秒 | `check_workload.UPDATE_KUBECONFIG_TIMEOUT_SEC` |
+| ヘルスチェックの HTTPS | 5 秒 | `check_apigw.HEALTH_TIMEOUT_SEC` |
+
+boto3 の既定は connect / read とも 60 秒で、DR 切替には長すぎる。
+`BOTO_CONFIG` を `common.client()` に必ず適用しているため、素の
+`boto3.client()` を直接呼ばないこと。
+
+botocore 内部のリトライは最小限（`max_attempts=1`）にし、再試行は
+Step Functions の `Retry` に任せる。実行履歴に残り、待機時間を宣言で
+制御できるため。なお `max_attempts` は**リトライ回数**であって総試行回数
+ではない（1 なら初回 + リトライ 1 回 = 合計 2 回）。API 呼び出し 1 回の
+最悪待ち時間は `(3 + 5) * 2 = 16 秒`。
+
+Lambda 自体のタイムアウトは 60 秒。いずれの関数も待機ループを持たないので、
+これ以上長くすると応答しない相手を待つだけになる。
 
 ## dry_run
 
@@ -392,3 +467,48 @@ Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグル�
 行う。EventBridge Scheduler で週次実行すれば、IAM 権限不足や設定漏れを平時に
 検出できる（訓練時にしか動かないコードの潜伏対策）。特に `dr-scheduler` の
 `iam:PassRole` は見落としやすいので、ここで早期に検証する。
+
+## 制御設計についての判断
+
+| 論点 | 判断 |
+|---|---|
+| 「未収束」を例外（`RetryableError`）で表現する | **現状維持**。AWS のポーリング定型は `Wait` + `Choice` であり意味論の批判は成立するが、実務上の差はなく ASL が単純になる利点が上回る |
+| 閉塞失敗時に無条件で続行する | **現状維持**（下記） |
+| 正常性確認が実機能を検証していない | **制約として受容**。NE 機器への誤警報になるため真のエンドツーエンド試験ができない。切替後の流量メトリクスの立ち上がりで代替する |
+| ワークフロー全体のタイムアウト・二重実行防止 | Step Functions 側の作業。ASL 着手時の要件とする |
+
+### 閉塞失敗時の扱い（現状維持と決定）
+
+閉塞に失敗しても切替を続行する。理由は、閉塞が失敗する主要因が旧リージョンの
+障害そのものであり、その場合は旧リージョン側のサービスも動いていないため。
+
+残るのは「部分障害で旧リージョンのアプリは生きているが、閉塞だけ失敗した」
+ケースで、理論上は両リージョンが同時にアクティブになりうる。ただし
+**判定手段がない**ため、対処を入れないと決めた。
+
+判定手段がない根拠:
+
+- 新 ACTIVE 側から旧リージョンを 1 回叩く方式は単一拠点からの判定になり、
+  リージョン間のネットワーク分断を「旧リージョンの停止」と誤判定する。
+  Route 53 が 18% という合議しきい値を持つのは、まさにこの誤判定
+  （ネットワーク条件による一部拠点からの隔離）を避けるため
+- 多拠点合議で判定するなら Route 53 ヘルスチェックを新設し、CloudWatch
+  （us-east-1）の `HealthCheckStatus` を読む必要がある。DR 専用のリソース
+  追加は避ける方針のため採らない
+- ARC のルーティングコントロールは「人間やランブックをフェイルオーバーの
+  ループに入れたい場合の正解」とされる明示的なスイッチであり、AWS 自身も
+  自動推論ではなく人間の判断を前提にしている
+
+閉塞失敗は `ContinuableError` として実行履歴の `ResultPath` に残るため、
+事後に「どのリソースが閉塞できなかったか」は追跡できる。
+
+## 残っている作業
+
+| 項目 | 内容 |
+|---|---|
+| F-10 | Dockerfile の分割。AWS CLI が必要なのは `check_workload` のみだが、10 本すべてのイメージに入っている |
+| F-11 | boto3 のバージョン固定。現在はランタイム同梱を使っている |
+| F-19 | ユニットテスト未作成 |
+| — | Step Functions の ASL 本体（フェーズ構成、Parallel、Retry / Catch の配線、全体タイムアウト、二重実行防止） |
+| — | Terraform 側の関数定義（`image_config.command` でハンドラを切り替える 10 本分） |
+| — | S3 レプリケーションの案 A / 案 B の決定 |

@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
-from common import RegionConfig, check_handler, client
+from aws import client
+from config import RegionConfig
+from handlers import check_handler
 
 
 @check_handler("dynamodb")

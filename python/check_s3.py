@@ -26,7 +26,9 @@ from __future__ import annotations
 
 from botocore.exceptions import ClientError
 
-from common import RegionConfig, check_handler, client
+from aws import client
+from config import RegionConfig
+from handlers import check_handler
 
 NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
 

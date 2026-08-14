@@ -20,6 +20,10 @@
         - Bearer トークン              … exec プラグインが aws eks get-token を
                                          都度実行して取得
 
+タイムアウト:
+    update-kubeconfig は 15 秒、Kubernetes API 呼び出しは (connect 3, read 10) 秒。
+    応答しない相手を待ち続けて RTO を消費しないようにする。
+
 前提:
     - クラスタ API エンドポイントはプライベートのみのため、到達可能な
       VPC・サブネット・セキュリティグループに配置する（既存 Lambda と同じ）
@@ -37,32 +41,39 @@ import subprocess
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from common import RegionConfig, check_handler, get_logger
+from config import RegionConfig
+from handlers import check_handler
+from logging_json import get_logger
 
 logger = get_logger(__name__)
 
 KUBECONFIG_PATH = "/tmp/kubeconfig"  # noqa: S108 - Lambda で書けるのは /tmp のみ
 AWS_CLI = os.environ.get("AWS_CLI_PATH", "aws")
-UPDATE_KUBECONFIG_TIMEOUT_SEC = 30
+UPDATE_KUBECONFIG_TIMEOUT_SEC = 15
+# Kubernetes API 呼び出しのタイムアウト (connect, read)。
+# 応答しないクラスタを待ち続けて RTO を消費しないようにする。
+K8S_TIMEOUT = (3, 10)
 
 
 def _build_clients(cfg: RegionConfig) -> tuple[k8s.CoreV1Api, k8s.AppsV1Api]:
-    os.environ.setdefault("HOME", "/tmp")  # noqa: S108
+    # HOME はベースイメージ側で設定されている可能性があるため無条件に上書きする。
+    # setdefault だと既存値が残り、AWS CLI が書き込めないパスへキャッシュを
+    # 作ろうとして失敗する。Lambda で書けるのは /tmp のみ。
+    os.environ["HOME"] = "/tmp"  # noqa: S108
     os.environ["KUBECONFIG"] = KUBECONFIG_PATH
 
-    # ウォームスタート時は生成済みの kubeconfig を再利用する。
-    # トークンは exec プラグインが都度取り直すため期限切れしない。
-    if not os.path.exists(KUBECONFIG_PATH):
-        subprocess.run(  # noqa: S603
-            [AWS_CLI, "eks", "update-kubeconfig",
-             "--name", cfg.eks_cluster_name,
-             "--region", cfg.region,
-             "--kubeconfig", KUBECONFIG_PATH],
-            check=True, capture_output=True,
-            timeout=UPDATE_KUBECONFIG_TIMEOUT_SEC,
-        )
-        logger.info("kubeconfig generated: cluster=%s region=%s",
-                    cfg.eks_cluster_name, cfg.region)
+    # 毎回生成する。ウォームスタート時に再利用する実装にすると、生成が
+    # 途中で失敗した場合に不完全なファイルが残り、そのコンテナが生きている
+    # 間ずっと壊れ続ける。コストは DescribeCluster 1 回分で、
+    # タイムアウトで上限を切れる。
+    subprocess.run(  # noqa: S603
+        [AWS_CLI, "eks", "update-kubeconfig",
+         "--name", cfg.eks_cluster_name,
+         "--region", cfg.region,
+         "--kubeconfig", KUBECONFIG_PATH],
+        check=True, capture_output=True,
+        timeout=UPDATE_KUBECONFIG_TIMEOUT_SEC,
+    )
 
     k8s_config.load_kube_config(config_file=KUBECONFIG_PATH)
     return k8s.CoreV1Api(), k8s.AppsV1Api()
@@ -85,7 +96,8 @@ def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: RegionConfig) -> dict
     """
     unconverged = {}
     for namespace in cfg.eks_namespaces:
-        for dep in apps_api.list_namespaced_deployment(namespace).items:
+        for dep in apps_api.list_namespaced_deployment(
+                namespace, _request_timeout=K8S_TIMEOUT).items:
             want = dep.spec.replicas or 0
             ready = dep.status.ready_replicas or 0
             if ready < want:
@@ -94,18 +106,28 @@ def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: RegionConfig) -> dict
     return unconverged
 
 
-def _not_ready_nodes(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> list[str]:
+def _hybrid_node_problem(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> dict | None:
     """Hybrid Node の Ready は Direct Connect 経路の生死をそのまま反映する。
     オンプレ側を直接叩かなくても、クラスタ API から判定できる。
+
+    「1 台も見つからない」と「Ready でない台がある」は別の異常なので、
+    ノード名のリストにセンチネル文字列を混ぜず、理由を分けて返す。
     """
-    nodes = core_api.list_node(label_selector=cfg.hybrid_node_selector).items
+    nodes = core_api.list_node(label_selector=cfg.hybrid_node_selector,
+                               _request_timeout=K8S_TIMEOUT).items
     if not nodes:
-        return ["<no hybrid node found>"]
-    return [
+        return {"reason": "no hybrid node matched the selector",
+                "selector": cfg.hybrid_node_selector}
+
+    not_ready = [
         node.metadata.name for node in nodes
         if not any(cond.type == "Ready" and cond.status == "True"
                    for cond in (node.status.conditions or []))
     ]
+    if not_ready:
+        return {"reason": "nodes not ready", "nodes": not_ready,
+                "total": len(nodes)}
+    return None
 
 
 def _pending_pods(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> list[str]:
@@ -113,7 +135,8 @@ def _pending_pods(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> list[str]:
     return [
         f"{namespace}/{pod.metadata.name}"
         for namespace in cfg.eks_namespaces
-        for pod in core_api.list_namespaced_pod(namespace).items
+        for pod in core_api.list_namespaced_pod(
+            namespace, _request_timeout=K8S_TIMEOUT).items
         if pod.status.phase == "Pending"
     ]
 
@@ -125,8 +148,8 @@ def handler(cfg: RegionConfig) -> dict:
     problems: dict[str, object] = {}
     if unconverged := _unconverged_deployments(apps_api, cfg):
         problems["deployments"] = unconverged
-    if not_ready := _not_ready_nodes(core_api, cfg):
-        problems["hybrid_nodes_not_ready"] = not_ready
+    if node_problem := _hybrid_node_problem(core_api, cfg):
+        problems["hybrid_nodes"] = node_problem
     if pending := _pending_pods(core_api, cfg):
         problems["pending_pods"] = pending
 

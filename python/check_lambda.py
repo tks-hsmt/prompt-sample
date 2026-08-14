@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
-from common import RegionConfig, check_handler, client
+from aws import client
+from config import RegionConfig
+from handlers import check_handler
 
 
 @check_handler("lambda")
@@ -37,10 +39,13 @@ def handler(cfg: RegionConfig) -> dict:
         if conf.get("LastUpdateStatus") != "Successful":
             issue["last_update_status"] = conf.get("LastUpdateStatus")
 
+        # ページネータを使う。既定では 100 件で打ち切られ、無言で
+        # 切り捨てられるため。
+        paginator = lam.get_paginator("list_event_source_mappings")
         disabled = [
             m["UUID"]
-            for m in lam.list_event_source_mappings(
-                FunctionName=name).get("EventSourceMappings", [])
+            for page in paginator.paginate(FunctionName=name)
+            for m in page["EventSourceMappings"]
             if m["State"] != "Enabled"
         ]
         if disabled:

@@ -27,7 +27,10 @@
 
 from __future__ import annotations
 
-from common import RegionConfig, client, get_logger, ops_handler, run_per_item
+from aws import client
+from config import RegionConfig
+from handlers import ops_handler, run_per_item
+from logging_json import get_logger
 
 logger = get_logger(__name__)
 
