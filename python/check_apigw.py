@@ -27,15 +27,15 @@ import urllib.error
 import urllib.request
 
 from aws import client
-from config import RegionConfig
+from config import ApiGatewayConfig
 from handlers import check_handler
 
 HEALTH_TIMEOUT_SEC = 5
 HTTP_OK = 200
 
 
-@check_handler("apigw")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("apigw", ApiGatewayConfig)
+def handler(cfg: ApiGatewayConfig) -> dict:
     apigw = client("apigateway", cfg.region)
     stage = apigw.get_stage(restApiId=cfg.rest_api_id, stageName=cfg.stage)
     settings = stage.get("methodSettings", {}).get("*/*", {})

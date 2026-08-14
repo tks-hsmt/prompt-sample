@@ -19,12 +19,12 @@
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import DynamoDbConfig
 from handlers import check_handler
 
 
-@check_handler("dynamodb")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("dynamodb", DynamoDbConfig)
+def handler(cfg: DynamoDbConfig) -> dict:
     ddb = client("dynamodb", cfg.region)
     return {
         name: {"status": status}

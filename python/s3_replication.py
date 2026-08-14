@@ -37,14 +37,14 @@
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import S3Config
 from handlers import ops_handler, run_per_item
 from logging_json import get_logger
 
 logger = get_logger(__name__)
 
 
-def _set_replication(cfg: RegionConfig, bucket: str, *,
+def _set_replication(cfg: S3Config, bucket: str, *,
                      enabled: bool, dry_run: bool) -> dict:
     """バケットのレプリケーションルールの Status を一括で切り替える.
 
@@ -77,8 +77,8 @@ def _set_replication(cfg: RegionConfig, bucket: str, *,
             "rules": {rule["ID"]: want for rule in configuration["Rules"]}}
 
 
-@ops_handler("s3-replication")
-def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
+@ops_handler("s3-replication", S3Config)
+def handler(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     enabled = bool(event["enabled"])
     buckets = run_per_item(
         cfg.replication_buckets,

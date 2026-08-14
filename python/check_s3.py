@@ -27,14 +27,14 @@ from __future__ import annotations
 from botocore.exceptions import ClientError
 
 from aws import client
-from config import RegionConfig
+from config import S3Config
 from handlers import check_handler
 
 NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
 
 
-@check_handler("s3")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("s3", S3Config)
+def handler(cfg: S3Config) -> dict:
     s3 = client("s3", cfg.region)
     problems: dict[str, dict] = {}
 

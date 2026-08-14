@@ -18,12 +18,12 @@ ALARM_PREFIX を設定して自チームのアラームだけに絞ること。
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import AlarmConfig
 from handlers import check_handler
 
 
-@check_handler("alarms")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("alarms", AlarmConfig)
+def handler(cfg: AlarmConfig) -> dict:
     cw = client("cloudwatch", cfg.region)
     kwargs: dict = {"StateValue": "ALARM"}
     if cfg.alarm_prefix:

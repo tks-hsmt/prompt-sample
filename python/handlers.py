@@ -19,7 +19,7 @@ import functools
 import json
 from typing import TYPE_CHECKING, Any
 
-from config import RegionConfig, Role, config
+from config import BaseConfig, Role
 from errors import (
     AWS_ERRORS,
     ContinuableError,
@@ -68,12 +68,15 @@ def run_per_item(items: list[str], fn: Callable[[str], dict], *,
     return results
 
 
-def ops_handler(action: str) -> Callable:
+def ops_handler(action: str, config_cls: type[BaseConfig]) -> Callable:
     """操作系ハンドラ用。role の解決・設定読み込み・ログ・応答整形・
     AWS 例外の分類を担う.
 
+    設定クラスは Lambda ごとに異なるため引数で受け取る。デコレータは
+    config_cls.from_env(role) を呼ぶだけで、どのフィールドがあるかは知らない。
+
     デコレートされる関数のシグネチャ:
-        fn(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict
+        fn(cfg: <ConfigCls>, event: dict, *, dry_run: bool, context) -> dict
 
     AWS 例外の捕捉をここに集約している理由:
         分類の判断材料はエラーコードと role の 2 つで、どちらもこの
@@ -93,7 +96,7 @@ def ops_handler(action: str) -> Callable:
         def wrapper(event: dict, context) -> dict:
             role: Role = event["role"]
             dry_run = bool(event.get("dry_run", False))
-            cfg = config(role)
+            cfg = config_cls.from_env(role)
             logger.info("%s start: role=%s region=%s dry_run=%s",
                         action, role, cfg.region, dry_run)
             try:
@@ -110,11 +113,13 @@ def ops_handler(action: str) -> Callable:
     return decorator
 
 
-def check_handler(name: str) -> Callable:
+def check_handler(name: str, config_cls: type[BaseConfig]) -> Callable:
     """観測系ハンドラ用。SELF 固定で実行し、未収束なら RetryableError を送出.
 
+    設定クラスは Lambda ごとに異なるため引数で受け取る。
+
     デコレートされる関数のシグネチャ:
-        fn(cfg: RegionConfig) -> dict   # 「問題のある項目」だけを返す
+        fn(cfg: <ConfigCls>) -> dict   # 「問題のある項目」だけを返す
 
     正常時は何も返さない。問題があった項目だけを例外に載せるため、
     項目ごとの ok フラグは持たない（例外に載る = NG が自明）。
@@ -122,10 +127,10 @@ def check_handler(name: str) -> Callable:
     バグであり、待っても直らないので止まるのが正しい。
     """
 
-    def decorator(fn: Callable[[RegionConfig], dict]) -> Callable[[dict, Any], None]:
+    def decorator(fn: Callable[[Any], dict]) -> Callable[[dict, Any], None]:
         @functools.wraps(fn)
         def wrapper(event: dict, context) -> None:
-            cfg = config("self")
+            cfg = config_cls.from_env("self")
             logger.info("check %s start: region=%s", name, cfg.region)
             problems = fn(cfg)
             if problems:

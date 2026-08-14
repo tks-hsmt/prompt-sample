@@ -118,6 +118,54 @@ Lambda は**操作するリソース単位**で分割する。各ファイルの
 - SQS ドレイン確認 … 障害時は待っても解消しないため実施しない
 - スケールアップ … 両リージョン同レプリカ数のため不要
 
+### 共通モジュール
+
+| ファイル | 責務 |
+|---|---|
+| `config.py` | リソース単位の設定クラスと環境変数の読み込み |
+| `errors.py` | 例外定義、`classify()` / `raise_classified()` |
+| `aws.py` | `BOTO_CONFIG`（タイムアウト・リトライ）と `client()` |
+| `logging_json.py` | JSON フォーマッタとロガー設定 |
+| `handlers.py` | `ops_handler` / `check_handler` / `run_per_item` |
+
+`classify()` は分類結果を**返す**（送出しない）。`run_per_item` が
+「分類はしたいが今は送出したくない」ため、入れ子の try/except を避けられる。
+単に送出したい場合は `raise_classified()` を使う。
+
+### 設定クラスはリソース単位
+
+Lambda をリソース単位に分割しているので、設定クラスも同じ単位で分ける。
+`BaseConfig`（role + region）を基底に、各リソース用のクラスが必要な項目だけを持つ。
+
+| クラス | 固有フィールド | 使う Lambda |
+|---|---|---|
+| `BaseConfig` | （role, region のみ） | — |
+| `ApiGatewayConfig` | rest_api_id, stage, throttle_rate, throttle_burst, health_url | dr-apigw, dr-check-apigw |
+| `SchedulerConfig` | schedule_group | dr-scheduler |
+| `S3Config` | replication_buckets | dr-s3-replication, dr-check-s3 |
+| `LambdaConfig` | function_names | dr-check-lambda |
+| `DynamoDbConfig` | table_names | dr-check-dynamodb |
+| `NlbConfig` | target_group_arns | dr-check-nlb |
+| `AlarmConfig` | alarm_prefix | dr-check-alarms |
+| `EksConfig` | cluster_name, namespaces, hybrid_node_selector | dr-check-workload |
+
+生成は `<Cls>.from_env(role)`。デコレータに設定クラスを渡す。
+
+```python
+@check_handler("nlb", NlbConfig)
+def handler(cfg: NlbConfig) -> dict:
+    ...
+```
+
+**必須項目を必須として宣言できる**のが最大の利点。単一の設定クラスを全 Lambda で
+共有していたときは、ある Lambda に必須の項目でも他には不要なのですべて省略可能に
+せざるを得ず、設定漏れを検出できなかった（`REST_API_ID` が空文字のまま API を
+叩いて分かりにくいエラーになる）。分割後は `from_env` の時点で
+`environment variable not set: SELF_REST_API_ID` で止まる。
+
+必須は `REGION` に加えて、`REST_API_ID` / `STAGE`（ApiGatewayConfig）、
+`SCHEDULE_GROUP`（SchedulerConfig）、`EKS_CLUSTER_NAME`（EksConfig）。
+
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
@@ -191,15 +239,15 @@ resource "aws_lambda_function" "check_nlb" {
 environment {
   variables = {
     SELF_REGION              = "ap-northeast-3"
-    SELF_REST_API_ID         = var.self_rest_api_id
-    SELF_STAGE               = var.self_stage
+    SELF_REST_API_ID         = var.self_rest_api_id         # ApiGatewayConfig で必須
+    SELF_STAGE               = var.self_stage               # ApiGatewayConfig で必須
     SELF_HEALTH_URL          = var.self_health_url
-    SELF_SCHEDULE_GROUP      = var.self_schedule_group   # 自チーム専用グループ
+    SELF_SCHEDULE_GROUP      = var.self_schedule_group      # SchedulerConfig で必須
     SELF_FUNCTION_NAMES      = jsonencode(var.self_function_names)
     SELF_TABLE_NAMES         = jsonencode(var.self_table_names)
     SELF_TARGET_GROUP_ARNS   = jsonencode(var.self_target_group_arns)
     SELF_ALARM_PREFIX        = var.self_alarm_prefix
-    SELF_EKS_CLUSTER_NAME    = var.self_eks_cluster_name
+    SELF_EKS_CLUSTER_NAME    = var.self_eks_cluster_name    # EksConfig で必須
     SELF_EKS_NAMESPACES      = jsonencode(var.self_eks_namespaces)
     SELF_REPLICATION_BUCKETS = jsonencode(var.self_replication_buckets) # 案 A のみ
 

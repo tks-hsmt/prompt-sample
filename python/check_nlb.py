@@ -41,12 +41,12 @@ Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグル�
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import NlbConfig
 from handlers import check_handler
 
 
-@check_handler("nlb")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("nlb", NlbConfig)
+def handler(cfg: NlbConfig) -> dict:
     elb = client("elbv2", cfg.region)
     problems: dict[str, dict] = {}
 

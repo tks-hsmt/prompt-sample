@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import SchedulerConfig
 from handlers import ops_handler, run_per_item
 from logging_json import get_logger
 
@@ -40,7 +40,7 @@ SCHEDULE_READONLY_KEYS = frozenset({
 })
 
 
-def _set_state(scheduler, cfg: RegionConfig, name: str, state: str) -> dict:
+def _set_state(scheduler, cfg: SchedulerConfig, name: str, state: str) -> dict:
     """1 件のスケジュールの State を変更する.
 
     State だけを渡す API は存在しない。UpdateSchedule は必須パラメータを
@@ -57,8 +57,8 @@ def _set_state(scheduler, cfg: RegionConfig, name: str, state: str) -> dict:
     return {"state": state}
 
 
-@ops_handler("scheduler")
-def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
+@ops_handler("scheduler", SchedulerConfig)
+def handler(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
     """自チーム専用グループのスケジュールを一括で有効化 / 無効化する.
 
     スケジュール名をハードコードせず list_schedules で列挙するため、

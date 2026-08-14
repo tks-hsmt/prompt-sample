@@ -41,7 +41,7 @@ import subprocess
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from config import RegionConfig
+from config import EksConfig
 from handlers import check_handler
 from logging_json import get_logger
 
@@ -55,7 +55,7 @@ UPDATE_KUBECONFIG_TIMEOUT_SEC = 15
 K8S_TIMEOUT = (3, 10)
 
 
-def _build_clients(cfg: RegionConfig) -> tuple[k8s.CoreV1Api, k8s.AppsV1Api]:
+def _build_clients(cfg: EksConfig) -> tuple[k8s.CoreV1Api, k8s.AppsV1Api]:
     # HOME はベースイメージ側で設定されている可能性があるため無条件に上書きする。
     # setdefault だと既存値が残り、AWS CLI が書き込めないパスへキャッシュを
     # 作ろうとして失敗する。Lambda で書けるのは /tmp のみ。
@@ -68,7 +68,7 @@ def _build_clients(cfg: RegionConfig) -> tuple[k8s.CoreV1Api, k8s.AppsV1Api]:
     # タイムアウトで上限を切れる。
     subprocess.run(  # noqa: S603
         [AWS_CLI, "eks", "update-kubeconfig",
-         "--name", cfg.eks_cluster_name,
+         "--name", cfg.cluster_name,
          "--region", cfg.region,
          "--kubeconfig", KUBECONFIG_PATH],
         check=True, capture_output=True,
@@ -79,7 +79,7 @@ def _build_clients(cfg: RegionConfig) -> tuple[k8s.CoreV1Api, k8s.AppsV1Api]:
     return k8s.CoreV1Api(), k8s.AppsV1Api()
 
 
-def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: RegionConfig) -> dict:
+def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: EksConfig) -> dict:
     """各 Deployment が自身の spec.replicas に収束しているかを判定する.
 
     必要数は Deployment 自身が spec.replicas として持っているため、設定値と
@@ -95,7 +95,7 @@ def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: RegionConfig) -> dict
     dry_run の定期実行や Terraform のドリフト検知で拾う。
     """
     unconverged = {}
-    for namespace in cfg.eks_namespaces:
+    for namespace in cfg.namespaces:
         for dep in apps_api.list_namespaced_deployment(
                 namespace, _request_timeout=K8S_TIMEOUT).items:
             want = dep.spec.replicas or 0
@@ -106,7 +106,7 @@ def _unconverged_deployments(apps_api: k8s.AppsV1Api, cfg: RegionConfig) -> dict
     return unconverged
 
 
-def _hybrid_node_problem(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> dict | None:
+def _hybrid_node_problem(core_api: k8s.CoreV1Api, cfg: EksConfig) -> dict | None:
     """Hybrid Node の Ready は Direct Connect 経路の生死をそのまま反映する。
     オンプレ側を直接叩かなくても、クラスタ API から判定できる。
 
@@ -130,19 +130,19 @@ def _hybrid_node_problem(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> dict | N
     return None
 
 
-def _pending_pods(core_api: k8s.CoreV1Api, cfg: RegionConfig) -> list[str]:
+def _pending_pods(core_api: k8s.CoreV1Api, cfg: EksConfig) -> list[str]:
     """Pending の Pod はノードキャパシティ不足のサイン。"""
     return [
         f"{namespace}/{pod.metadata.name}"
-        for namespace in cfg.eks_namespaces
+        for namespace in cfg.namespaces
         for pod in core_api.list_namespaced_pod(
             namespace, _request_timeout=K8S_TIMEOUT).items
         if pod.status.phase == "Pending"
     ]
 
 
-@check_handler("workload")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("workload", EksConfig)
+def handler(cfg: EksConfig) -> dict:
     core_api, apps_api = _build_clients(cfg)
 
     problems: dict[str, object] = {}

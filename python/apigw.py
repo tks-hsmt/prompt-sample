@@ -53,7 +53,7 @@
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import ApiGatewayConfig
 from handlers import ops_handler
 from logging_json import get_logger
 
@@ -82,8 +82,8 @@ def _current_throttle(stage: dict) -> tuple[float | None, int | None]:
             settings.get("throttlingBurstLimit"))
 
 
-@ops_handler("apigw")
-def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
+@ops_handler("apigw", ApiGatewayConfig)
+def handler(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
     blocked = bool(event["blocked"])
 
     if blocked:

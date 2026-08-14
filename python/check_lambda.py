@@ -21,12 +21,12 @@
 from __future__ import annotations
 
 from aws import client
-from config import RegionConfig
+from config import LambdaConfig
 from handlers import check_handler
 
 
-@check_handler("lambda")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("lambda", LambdaConfig)
+def handler(cfg: LambdaConfig) -> dict:
     lam = client("lambda", cfg.region)
     problems: dict[str, dict] = {}
 
