@@ -23,14 +23,7 @@ from __future__ import annotations
 
 import json
 
-from common import (
-    AWS_ERRORS,
-    RegionConfig,
-    client,
-    get_logger,
-    ops_handler,
-    raise_classified,
-)
+from common import RegionConfig, client, get_logger, ops_handler
 
 logger = get_logger(__name__)
 
@@ -88,35 +81,31 @@ def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
     arn = f"arn:aws:execute-api:{cfg.region}:{account}:{cfg.rest_api_id}/*"
     apigw = client("apigateway", cfg.region)
 
-    try:
-        current = _parse_policy(
-            apigw.get_rest_api(restApiId=cfg.rest_api_id).get("policy"))
-        already = any(stmt.get("Sid") == DENY_SID
-                      for stmt in current.get("Statement", []))
+    # AWS 例外の捕捉・分類は @ops_handler が担う（正常系だけを書く）
+    current = _parse_policy(
+        apigw.get_rest_api(restApiId=cfg.rest_api_id).get("policy"))
+    already = any(stmt.get("Sid") == DENY_SID
+                  for stmt in current.get("Statement", []))
 
-        if already == blocked:
-            # 既に目標状態。再デプロイもしない（冪等）。
-            return {"changed": False, "blocked": blocked,
-                    "reason": "already in desired state"}
+    if already == blocked:
+        # 既に目標状態。再デプロイもしない（冪等）。
+        return {"changed": False, "blocked": blocked,
+                "reason": "already in desired state"}
 
-        if dry_run:
-            return {"changed": False, "blocked": blocked,
-                    "would": f"set policy blocked={blocked}, redeploy {cfg.stage}"}
+    if dry_run:
+        return {"changed": False, "blocked": blocked,
+                "would": f"set policy blocked={blocked}, redeploy {cfg.stage}"}
 
-        apigw.update_rest_api(
-            restApiId=cfg.rest_api_id,
-            patchOperations=[{
-                "op": "replace", "path": "/policy",
-                "value": json.dumps(_build_policy(arn, blocked=blocked)),
-            }],
-        )
-        deployment = apigw.create_deployment(
-            restApiId=cfg.rest_api_id, stageName=cfg.stage,
-            description=f"DR switch: blocked={blocked}",
-        )
-    except AWS_ERRORS as exc:
-        raise_classified(exc, role=cfg.role,
-                         what=f"apigw({cfg.role}:{cfg.rest_api_id})")
-
+    apigw.update_rest_api(
+        restApiId=cfg.rest_api_id,
+        patchOperations=[{
+            "op": "replace", "path": "/policy",
+            "value": json.dumps(_build_policy(arn, blocked=blocked)),
+        }],
+    )
+    deployment = apigw.create_deployment(
+        restApiId=cfg.rest_api_id, stageName=cfg.stage,
+        description=f"DR switch: blocked={blocked}",
+    )
     return {"changed": True, "blocked": blocked,
             "deployment_id": deployment["id"]}

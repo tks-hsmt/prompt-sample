@@ -27,14 +27,7 @@
 
 from __future__ import annotations
 
-from common import (
-    AWS_ERRORS,
-    RegionConfig,
-    client,
-    get_logger,
-    ops_handler,
-    raise_classified,
-)
+from common import RegionConfig, client, get_logger, ops_handler, run_per_item
 
 logger = get_logger(__name__)
 
@@ -44,7 +37,7 @@ SCHEDULE_READONLY_KEYS = frozenset({
 })
 
 
-def _set_state(scheduler, cfg: RegionConfig, name: str, state: str) -> None:
+def _set_state(scheduler, cfg: RegionConfig, name: str, state: str) -> dict:
     """1 件のスケジュールの State を変更する.
 
     State だけを渡す API は存在しない。UpdateSchedule は必須パラメータを
@@ -58,6 +51,7 @@ def _set_state(scheduler, cfg: RegionConfig, name: str, state: str) -> None:
               if key not in SCHEDULE_READONLY_KEYS}
     params["State"] = state
     scheduler.update_schedule(**params)
+    return {"state": state}
 
 
 @ops_handler("scheduler")
@@ -70,24 +64,24 @@ def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
     enabled = bool(event["enabled"])
     scheduler = client("scheduler", cfg.region)
     want = "ENABLED" if enabled else "DISABLED"
-    changed: list[str] = []
-    skipped: list[str] = []
 
-    try:
-        paginator = scheduler.get_paginator("list_schedules")
-        for page in paginator.paginate(GroupName=cfg.schedule_group):
-            for summary in page["Schedules"]:
-                name = summary["Name"]
-                # 一覧に State が含まれるので、冪等判定に get_schedule は不要
-                if summary.get("State") == want:
-                    skipped.append(name)
-                    continue
-                if not dry_run:
-                    _set_state(scheduler, cfg, name, want)
-                changed.append(name)
-    except AWS_ERRORS as exc:
-        raise_classified(exc, role=cfg.role,
-                         what=f"scheduler({cfg.role}:{cfg.schedule_group})")
+    # 一覧取得の失敗は 1 件の失敗ではないので、@ops_handler に分類させる
+    paginator = scheduler.get_paginator("list_schedules")
+    summaries = [summary
+                 for page in paginator.paginate(GroupName=cfg.schedule_group)
+                 for summary in page["Schedules"]]
+
+    # 一覧に State が含まれるので、冪等判定に get_schedule は不要
+    skipped = [s["Name"] for s in summaries if s.get("State") == want]
+    targets = [s["Name"] for s in summaries if s.get("State") != want]
+
+    def apply(name: str) -> dict:
+        if dry_run:
+            return {"would": f"set state to {want}"}
+        return _set_state(scheduler, cfg, name, want)
+
+    # 1 件失敗しても残りは必ず試みる。閉塞では止められた分だけリスクが減る。
+    changed = run_per_item(targets, apply, role=cfg.role, what="scheduler")
 
     return {"enabled": enabled, "group": cfg.schedule_group,
             "changed": changed, "skipped": skipped}

@@ -36,16 +36,7 @@
 
 from __future__ import annotations
 
-from common import (
-    AWS_ERRORS,
-    ContinuableError,
-    RegionConfig,
-    RetryableError,
-    client,
-    get_logger,
-    ops_handler,
-    raise_classified,
-)
+from common import RegionConfig, client, get_logger, ops_handler, run_per_item
 
 logger = get_logger(__name__)
 
@@ -57,28 +48,27 @@ def _set_replication(cfg: RegionConfig, bucket: str, *,
     put_bucket_replication は設定を丸ごと置き換えるため、必ず
     get -> 修正 -> put の順で行い、設定を自前で組み立て直さない
     （フィルタ・優先度・宛先などの既存設定を失わないため）。
+
+    例外の捕捉は run_per_item が担う（バケット単位で集約するため）。
     """
     s3 = client("s3", cfg.region)
     want = "Enabled" if enabled else "Disabled"
 
-    try:
-        configuration = s3.get_bucket_replication(
-            Bucket=bucket)["ReplicationConfiguration"]
-        current = {rule["ID"]: rule["Status"] for rule in configuration["Rules"]}
+    configuration = s3.get_bucket_replication(
+        Bucket=bucket)["ReplicationConfiguration"]
+    current = {rule["ID"]: rule["Status"] for rule in configuration["Rules"]}
 
-        if all(status == want for status in current.values()):
-            return {"changed": False, "status": want, "rules": current}
+    if all(status == want for status in current.values()):
+        return {"changed": False, "status": want, "rules": current}
 
-        if dry_run:
-            return {"changed": False, "status": want, "rules": current,
-                    "would": f"set all rules to {want}"}
+    if dry_run:
+        return {"changed": False, "status": want, "rules": current,
+                "would": f"set all rules to {want}"}
 
-        for rule in configuration["Rules"]:
-            rule["Status"] = want
-        s3.put_bucket_replication(
-            Bucket=bucket, ReplicationConfiguration=configuration)
-    except AWS_ERRORS as exc:
-        raise_classified(exc, role=cfg.role, what=f"s3-replication({bucket})")
+    for rule in configuration["Rules"]:
+        rule["Status"] = want
+    s3.put_bucket_replication(
+        Bucket=bucket, ReplicationConfiguration=configuration)
 
     return {"changed": True, "status": want,
             "rules": {rule["ID"]: want for rule in configuration["Rules"]}}
@@ -87,28 +77,10 @@ def _set_replication(cfg: RegionConfig, bucket: str, *,
 @ops_handler("s3-replication")
 def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
     enabled = bool(event["enabled"])
-    buckets: dict[str, dict] = {}
-    errors: list[str] = []
-    retryable = False
-
-    # 複数バケットを独立に処理する。1 つ失敗しても残りは必ず試みる。
-    for bucket in cfg.replication_buckets:
-        try:
-            buckets[bucket] = _set_replication(
-                cfg, bucket, enabled=enabled, dry_run=dry_run)
-        except RetryableError as exc:
-            retryable = True
-            buckets[bucket] = {"error": str(exc)}
-            errors.append(f"{bucket}: {exc}")
-        except ContinuableError as exc:
-            buckets[bucket] = {"error": str(exc)}
-            errors.append(f"{bucket}: {exc}")
-
-    if errors:
-        message = "; ".join(errors)
-        # 一時エラーが 1 つでもあれば全体を再試行させる。操作は冪等。
-        if retryable:
-            raise RetryableError(message)
-        raise ContinuableError(message)
-
+    buckets = run_per_item(
+        cfg.replication_buckets,
+        lambda bucket: _set_replication(
+            cfg, bucket, enabled=enabled, dry_run=dry_run),
+        role=cfg.role, what="s3-replication",
+    )
     return {"enabled": enabled, "buckets": buckets}
