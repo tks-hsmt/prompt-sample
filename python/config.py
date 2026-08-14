@@ -1,24 +1,7 @@
 """環境変数からの設定読み込み.
 
-Terraform から SELF_* / PEER_* を注入する。東京デプロイと大阪デプロイで
-self / peer を入れ替えて同じモジュールを呼ぶだけでよい。
-リスト・マップは JSON 文字列で渡す。
-
-Lambda はリソース単位に分割しているため、設定クラスもリソース単位に分ける。
-1 つの巨大な設定クラスを全 Lambda で共有すると
-
-    - どの Lambda がどの環境変数を必要とするのかコードから読めない
-    - ある Lambda にとって必須の項目でも、他の Lambda には不要なので
-      すべて省略可能にせざるを得ず、設定漏れを検出できない
-    - 無関係なフィールドが補完に出て、取り違えても静的に気づけない
-
-という問題が出る。リソース単位に分けることで、必須項目を _required で
-宣言でき、設定漏れが from_env の時点で止まる。
-
-必須と省略可能を関数で分けている（_required / _optional）。
-「default が None かどうか」で必須性を表す方式にすると、
-「省略可能で既定値が None」の項目（HEALTH_URL）を表現できず、
-そこだけ os.environ を直接呼ぶことになるため。
+SELF_* / PEER_* を Terraform から注入する。Lambda ごとに必要な項目が
+違うため、設定クラスもリソース単位に分ける。
 """
 
 from __future__ import annotations
@@ -32,11 +15,10 @@ Role = Literal["self", "peer"]
 
 DEFAULT_THROTTLE_RATE = "10000"
 DEFAULT_THROTTLE_BURST = "5000"
-DEFAULT_HYBRID_NODE_SELECTOR = "eks.amazonaws.com/compute-type=hybrid"
 
 
 def _required(role: Role, key: str) -> str:
-    """未設定なら停止する環境変数。デプロイ時の設定漏れを即座に露見させる。"""
+    """未設定なら KeyError。必須項目に使う。"""
     name = f"{role.upper()}_{key}"
     value = os.environ.get(name)
     if value is None:
@@ -45,7 +27,7 @@ def _required(role: Role, key: str) -> str:
 
 
 def _optional(role: Role, key: str, default: str | None = None) -> str | None:
-    """省略可能な環境変数。既定値が None のものもここで扱える。"""
+    """省略可能な環境変数。"""
     return os.environ.get(f"{role.upper()}_{key}", default)
 
 
@@ -56,7 +38,7 @@ def _optional_json(role: Role, key: str, default: Any) -> Any:
 
 @dataclass(frozen=True)
 class BaseConfig:
-    """全 Lambda が使う最小限。client() と例外分類にリージョンと role が要る。"""
+    """全 Lambda が使う最小限。"""
 
     role: Role
     region: str
@@ -83,19 +65,17 @@ class ApiGatewayConfig(BaseConfig):
             region=_required(role, "REGION"),
             rest_api_id=_required(role, "REST_API_ID"),
             stage=_required(role, "STAGE"),
-            # 開放時に戻す値。アカウントのデフォルトと同値にしておく。
             throttle_rate=float(_optional(role, "THROTTLE_RATE",
                                           DEFAULT_THROTTLE_RATE)),
             throttle_burst=int(_optional(role, "THROTTLE_BURST",
                                          DEFAULT_THROTTLE_BURST)),
-            # ヘルスチェック経路が無い環境もあるため省略可能
             health_url=_optional(role, "HEALTH_URL"),
         )
 
 
 @dataclass(frozen=True)
 class SchedulerConfig(BaseConfig):
-    """dr-scheduler. 自チーム専用のスケジュールグループを指定する。"""
+    """dr-scheduler."""
 
     schedule_group: str
 
@@ -170,7 +150,7 @@ class NlbConfig(BaseConfig):
 
 @dataclass(frozen=True)
 class AlarmConfig(BaseConfig):
-    """dr-check-alarms. 接頭辞を空にすると全アラームが対象になる。"""
+    """dr-check-alarms."""
 
     alarm_prefix: str = ""
 
@@ -184,20 +164,24 @@ class AlarmConfig(BaseConfig):
 
 
 @dataclass(frozen=True)
+class ClusterConfig:
+    """確認対象のクラスタ 1 つ分。"""
+
+    name: str
+    namespaces: list[str]
+
+
+@dataclass(frozen=True)
 class EksConfig(BaseConfig):
     """dr-check-workload."""
 
-    cluster_name: str
-    namespaces: list[str] = field(default_factory=list)
-    hybrid_node_selector: str = DEFAULT_HYBRID_NODE_SELECTOR
+    clusters: list[ClusterConfig] = field(default_factory=list)
 
     @classmethod
     def from_env(cls, role: Role) -> Self:
+        raw = _optional_json(role, "EKS_CLUSTERS", [])
         return cls(
             role=role,
             region=_required(role, "REGION"),
-            cluster_name=_required(role, "EKS_CLUSTER_NAME"),
-            namespaces=_optional_json(role, "EKS_NAMESPACES", []),
-            hybrid_node_selector=_optional(role, "HYBRID_NODE_SELECTOR",
-                                           DEFAULT_HYBRID_NODE_SELECTOR),
+            clusters=[ClusterConfig(**c) for c in raw],
         )

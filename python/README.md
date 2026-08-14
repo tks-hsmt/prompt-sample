@@ -147,7 +147,7 @@ Lambda をリソース単位に分割しているので、設定クラスも同�
 | `DynamoDbConfig` | table_names | dr-check-dynamodb |
 | `NlbConfig` | target_group_arns | dr-check-nlb |
 | `AlarmConfig` | alarm_prefix | dr-check-alarms |
-| `EksConfig` | cluster_name, namespaces, hybrid_node_selector | dr-check-workload |
+| `EksConfig` | clusters（`ClusterConfig` のリスト） | dr-check-workload |
 
 生成は `<Cls>.from_env(role)`。デコレータに設定クラスを渡す。
 
@@ -463,16 +463,74 @@ Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグル�
 
 ## EKS ワークロードの判定
 
-`dr-check-workload` は `EKS_NAMESPACES` の各 namespace の Deployment を
-列挙し、`status.ready_replicas >= spec.replicas` で判定する。
+### 対象
 
-- 必要数は Deployment 自身が持っているので設定値として与えない
-- Deployment 名も列挙するため、設定は namespace のリストだけで済む
-- `status.replicas`（作成済み数）ではなく `ready_replicas` を見る
+自チームのクラスタは 2 つあり、namespace は両クラスタで同じ。別 namespace には
+他チームの Pod も乗っているため、namespace で絞る。ワークロードは
+Deployment / DaemonSet / CronJob の 3 種。
 
-検出できないもの: 「本来 3 のはずが `spec.replicas` が 1 になっている」ような
-平時の構成ドリフト。切替の瞬間に気づいても打つ手がないので、dry_run の
-定期実行や Terraform のドリフト検知で拾う。
+設定はクラスタ単位の入れ子にする。クラスタごとに namespace が違い得るため、
+クラスタと並列には置けない。
+
+```hcl
+SELF_EKS_CLUSTERS = jsonencode([
+  { name = "cluster-a", namespaces = ["ns-1", "ns-2"] },
+  { name = "cluster-b", namespaces = ["ns-1", "ns-2"] },
+])
+```
+
+`namespaces` は必須。全チーム共通の Lambda に包含する場合も、クラスタを
+足すか namespaces に全チーム分を列挙すればよい。
+
+### 種別ごとの判定条件
+
+| 種別 | 必要数の出どころ | 判定 |
+|---|---|---|
+| Deployment | `spec.replicas` | `status.readyReplicas >= spec.replicas` |
+| DaemonSet | **ノード数から算出** | `numberReady >= desiredNumberScheduled` かつ `numberMisscheduled == 0` かつ **`desiredNumberScheduled > 0`** |
+| CronJob | — | **確認しない**（下記） |
+
+**DaemonSet の `desiredNumberScheduled` は Pod 数ではなくノード数由来**で、
+セレクタに一致するノードが 0 台なら 0 になる。すると `numberReady(0) ==
+desired(0)` が成立し、Pod が 1 つも無いのに正常と判定される。自チームの
+DaemonSet は Hybrid Node 上のみで動くため、Direct Connect 断でこれが実際に
+起こり得る。`desiredNumberScheduled == 0` は異常として扱う。
+
+**CronJob は確認対象から外す。** Pod は Job 実行中しか存在せず readiness の
+概念が無い。確認できるのは `spec.suspend` だが、Kubernetes がこれを自動で
+立てることはなく、切替ワークフローも触らないため、検出できるのは平時の
+構成ドリフトだけになる。`spec.replicas` のドリフトを切替時に見ないと決めたのと
+同じ理由で外す（`lastScheduleTime` は切替直後は定義上古いので使えない）。
+
+### ノードを確認しない理由
+
+Hybrid Node の Ready を直接確認する案は採らない。DaemonSet の判定と
+検出できる事象が重なり、ノード確認だけが検出できる事象が無いため。
+
+| 事象 | ノード確認 | DaemonSet 確認 |
+|---|---|---|
+| ノードがクラスタから消えた | セレクタ一致 0 台 | `desired == 0` |
+| ノードは居るが NotReady | `Ready != True` | `ready < desired` |
+| ノードは Ready だが Pod が落ちている | 検出不可 | `ready < desired` |
+
+固有の価値はノード名が分かることだけで、切替可否の判断は変わらない。
+一方 Node はクラスタスコープのリソースなので ClusterRoleBinding が必要になり、
+クラスタが他チーム管理である以上その権限を依頼することになる。
+得るものに対してコストが見合わない。
+
+この判断により、必要な RBAC は namespaced リソースの読み取りだけになる
+（各 namespace の RoleBinding のみ。ClusterRoleBinding は不要）。
+
+### Pending Pod の扱い
+
+CronJob が作る Job Pod は起動直後に Pending になるのが正常なため、
+`ownerReferences` が Job のものは除外する。
+
+### CronJob を閉塞対象に含めない理由
+
+入口（vLB）が閉塞されれば処理対象のファイルが増えなくなり、空振りするだけの
+ため。むしろ動かし続けることで、閉塞直前に書き込まれた未処理ファイルを
+S3 へ吐き出して回収できる。
 
 ## check_workload の接続方式
 

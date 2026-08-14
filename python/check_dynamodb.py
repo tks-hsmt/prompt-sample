@@ -1,19 +1,9 @@
-"""dr-check-dynamodb: 新 ACTIVE 側の DynamoDB テーブルが使える状態か確認する.
+"""dr-check-dynamodb: DynamoDB テーブルが使える状態か確認する.
 
-===========================================================================
-必要な IAM 権限
----------------------------------------------------------------------------
-    dynamodb:DescribeTable   arn:aws:dynamodb:<SELF>:<acct>:table/<対象>
+必要な IAM:
+    dynamodb:DescribeTable
 
-    ※ SELF リージョンのみ。読み取り専用。
-===========================================================================
-
-東京・大阪でレプリケーションしない構成のため、PEER の中身は確認不要。
-リージョンごとに独立した状態を持ち、大阪は大阪の状態で動き始めればよい。
-テーブルが使える状態かだけを見る。
-
-入力 : {}
-出力 : 正常時は無し / 未収束なら RetryableError
+入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
 """
 
 from __future__ import annotations
@@ -25,6 +15,7 @@ from handlers import check_handler
 
 @check_handler("dynamodb", DynamoDbConfig)
 def handler(cfg: DynamoDbConfig) -> dict:
+    # aws dynamodb describe-table --table-name <name> の Table.TableStatus
     ddb = client("dynamodb", cfg.region)
     return {
         name: {"status": status}

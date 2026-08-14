@@ -1,21 +1,11 @@
-"""dr-check-lambda: 新 ACTIVE 側の Lambda が実行可能な状態か確認する.
+"""dr-check-lambda: Lambda が実行可能な状態か確認する.
 
-===========================================================================
-必要な IAM 権限
----------------------------------------------------------------------------
-    lambda:GetFunction              arn:aws:lambda:<SELF>:<acct>:function:<対象>
-    lambda:ListEventSourceMappings  *   （リソースレベル指定不可）
+State / LastUpdateStatus と、イベントソースマッピングが Enabled かを見る。
 
-    ※ SELF リージョンのみ。読み取り専用。
-===========================================================================
+必要な IAM:
+    lambda:GetFunction / lambda:ListEventSourceMappings
 
-確認内容:
-    State == "Active" かつ LastUpdateStatus == "Successful"
-    SQS を消費するイベントソースマッピングが Enabled であること
-    （SQS の消費が Lambda の ESM であることは確認済み）
-
-入力 : {}
-出力 : 正常時は無し / 未収束なら RetryableError
+入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
 """
 
 from __future__ import annotations
@@ -31,6 +21,8 @@ def handler(cfg: LambdaConfig) -> dict:
     problems: dict[str, dict] = {}
 
     for name in cfg.function_names:
+        # aws lambda get-function --function-name <name>
+        #   の Configuration.State / Configuration.LastUpdateStatus
         conf = lam.get_function(FunctionName=name)["Configuration"]
         issue = {}
 
@@ -39,8 +31,9 @@ def handler(cfg: LambdaConfig) -> dict:
         if conf.get("LastUpdateStatus") != "Successful":
             issue["last_update_status"] = conf.get("LastUpdateStatus")
 
-        # ページネータを使う。既定では 100 件で打ち切られ、無言で
-        # 切り捨てられるため。
+        # aws lambda list-event-source-mappings --function-name <name>
+        #   の EventSourceMappings[].State
+        # 既定では 100 件で無言に打ち切られるためページネータを使う
         paginator = lam.get_paginator("list_event_source_mappings")
         disabled = [
             m["UUID"]

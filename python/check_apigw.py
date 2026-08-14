@@ -1,24 +1,12 @@
-"""dr-check-apigw: 新 ACTIVE 側の API Gateway が受けられる状態か確認する.
+"""dr-check-apigw: API Gateway が受けられる状態か確認する.
 
-===========================================================================
-必要な IAM 権限
----------------------------------------------------------------------------
-    apigateway:GET
-        arn:aws:apigateway:<SELF>::/restapis/<id>/stages/<stage>
+設定確認だけでは「設定は正しいが通らない」を検出できないため、
+ヘルスチェック URL へ実リクエストを 1 回投げる。
 
-    ※ SELF リージョンのみ。読み取り専用ロールにできる。
-    ※ ヘルスチェック URL への HTTPS リクエストに IAM 権限は不要。
-===========================================================================
+必要な IAM:
+    apigateway:GET   SELF の /restapis/<id>/stages/<stage>
 
-コントロールプレーンの設定確認だけでは「設定は正しいが通らない」を検出
-できないため、保守経路のヘルスチェックパスへ実リクエストを 1 発投げる。
-（NE 機器への誤警報にならない経路であること）
-
-閉塞はステージのスロットリングで行うため、開放が効いていなければ
-429 が返る。失敗時はスロットリングの現在値も結果に含める。
-
-入力 : {}
-出力 : 正常時は無し / 未収束なら RetryableError
+入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
 """
 
 from __future__ import annotations
@@ -36,6 +24,8 @@ HTTP_OK = 200
 
 @check_handler("apigw", ApiGatewayConfig)
 def handler(cfg: ApiGatewayConfig) -> dict:
+    # aws apigateway get-stage --rest-api-id <id> --stage-name <stage>
+    #   の methodSettings."*/*".throttlingRateLimit / throttlingBurstLimit
     apigw = client("apigateway", cfg.region)
     stage = apigw.get_stage(restApiId=cfg.rest_api_id, stageName=cfg.stage)
     settings = stage.get("methodSettings", {}).get("*/*", {})
