@@ -1,9 +1,64 @@
 # DR 切替 Lambda 実装メモ
 
+## エラー処理の契約
+
+Step Functions が区別する必要があるのは 2 つだけ。
+
+| 例外 | 意味 | ASL 側 |
+|---|---|---|
+| `RetryableError` | 一時的。または「まだ収束していない」 | `Retry` |
+| `ContinuableError` | 失敗したが作業継続してよい（旧 ACTIVE 側の閉塞失敗） | `Catch` |
+| （型を定義しない） | それ以外すべて | 何にもマッチせず**ワークフロー停止** |
+
+「止めるべきエラー」に独自の型は定義しない。`Retry` にも `Catch` にも
+マッチしない例外は Step Functions が失敗させるため、停止はデフォルトの
+挙動である。設定不備や権限不足はバグであり、未捕捉例外として止まるのが
+正しい。`ConfigError` / `FatalError` / `PermanentFailure` のような型は作らない。
+
+`raise_classified()` の振り分け:
+
+| role | エラー | 結果 |
+|---|---|---|
+| any | スロットリング等 | `RetryableError` |
+| peer | その他の AWS エラー | `ContinuableError` |
+| self | その他の AWS エラー | 元の例外をそのまま送出（停止） |
+
+AWS SDK 以外の例外（`KeyError` 等）は分類せず素通しさせる。自分のコードの
+バグをインフラ障害に化けさせないため。
+
+## 横断処理はデコレータ
+
+`common.py` の 2 つのデコレータが、role 解決・設定読み込み・ログ・応答整形・
+例外送出を担う。各ハンドラは自分の確認内容だけを書く。
+
+### 観測系 `@check_handler(name)`
+
+```python
+@check_handler("nlb")
+def handler(cfg: RegionConfig) -> dict:
+    return problems   # 問題のある項目だけを返す。正常なら {}
+```
+
+- **正常時は何も返さない**（`None`）
+- 問題があれば、その項目だけを JSON にして `RetryableError` で送出
+- 項目ごとの `ok` フラグは持たない。例外に載る = NG が自明なので冗長
+- AWS API のエラーは握りつぶさず素通し。権限不足やリソース不在はバグであり、
+  待っても直らないので止まるのが正しい
+
+### 操作系 `@ops_handler(action)`
+
+```python
+@ops_handler("apigw")
+def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
+    return {"changed": True, ...}
+```
+
+`{"action", "role", "region", "dry_run"}` を付けて返す。
+
 ## 構成
 
-Lambda は **操作するリソース単位**で分割する。1 関数に複数リソースの操作を
-まとめない。各ファイルの docstring 冒頭に必要な IAM 権限を明記している。
+Lambda は**操作するリソース単位**で分割する。各ファイルの docstring 冒頭に
+必要な IAM 権限を明記している。
 
 | # | 関数 | ファイル | 対象リソース | 種別 | 対象リージョン |
 |---|---|---|---|---|---|
@@ -18,8 +73,6 @@ Lambda は **操作するリソース単位**で分割する。1 関数に複数
 | 9 | dr-check-alarms | `check_alarms.py` | CloudWatch | 観測 | SELF |
 | 10 | dr-check-workload | `check_workload.py` | EKS Pod / Hybrid Node | 観測 | SELF |
 
-共通モジュール: `common.py`（設定・例外分類・観測系の共通処理）
-
 `dr-s3-replication` は **S3 案 A を採用する場合のみ**デプロイする（後述）。
 
 10 本とも東京・大阪の**両リージョンにデプロイ**する。実行するのは常に
@@ -31,35 +84,59 @@ Lambda は **操作するリソース単位**で分割する。1 関数に複数
 - SQS ドレイン確認 … 障害時は待っても解消しないため実施しない
 - スケールアップ … 両リージョン同レプリカ数のため不要
 
+## デプロイ（コンテナイメージ）
+
+既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
+10 本で同一イメージを共有し、ハンドラだけ変える。
+
+```hcl
+resource "aws_lambda_function" "check_nlb" {
+  package_type = "Image"
+  image_uri    = "${aws_ecr_repository.dr.repository_url}:${var.image_tag}"
+  image_config {
+    command = ["check_nlb.handler"]
+  }
+  # ...
+}
+```
+
+`check_workload` のみ VPC 設定が必要（既存の Pod 再起動 Lambda と同じ
+サブネット・セキュリティグループ）。イメージには AWS CLI と
+`kubernetes` パッケージを同梱している。
+
+ログは `common.py` の JSON フォーマッタで構造化する。ランタイムのログ形式
+設定にも Powertools にも依存しない。
+
 ## IAM（リソース単位）
 
 観測系（4〜10）はすべて読み取り専用ロールにできる。変更系（1〜3）とは
-必ずロールを分けること。観測系は dry_run 定期実行の安全性が上がる。
+必ずロールを分けること。
 
 | 関数 | 必要なアクション | Resource |
 |---|---|---|
-| dr-apigw | `apigateway:GET` `apigateway:PATCH` `apigateway:POST` `apigateway:UpdateRestApiPolicy` | **両リージョン**の `/restapis/<id>` と配下 |
-| dr-scheduler | `scheduler:ListSchedules` `scheduler:GetSchedule` `scheduler:UpdateSchedule` `iam:PassRole` | **両リージョン**の自チームグループのみ／スケジュール実行ロール |
-| dr-s3-replication | `s3:GetReplicationConfiguration` `s3:PutReplicationConfiguration` `iam:PassRole` | **両リージョン**のバケット／レプリケーションロール |
+| dr-apigw | `apigateway:GET` `PATCH` `POST` `UpdateRestApiPolicy` | **両リージョン**の `/restapis/<id>` と配下 |
+| dr-scheduler | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **両リージョン**の自チームグループのみ／スケジュール実行ロール |
+| dr-s3-replication | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **両リージョン**のバケット／レプリケーションロール |
 | dr-check-apigw | `apigateway:GET` | SELF の `/restapis/<id>/stages/<stage>` |
-| dr-check-lambda | `lambda:GetFunction` `lambda:ListEventSourceMappings` | SELF の対象関数／ESM は `*` |
+| dr-check-lambda | `lambda:GetFunction` `ListEventSourceMappings` | SELF の対象関数／ESM は `*` |
 | dr-check-dynamodb | `dynamodb:DescribeTable` | SELF の対象テーブル |
-| dr-check-nlb | `elasticloadbalancing:DescribeTargetHealth` `elasticloadbalancing:DescribeTargetGroups` | `*` |
-| dr-check-s3 | `s3:ListBucket` `s3:GetReplicationConfiguration` | SELF のバケット |
+| dr-check-nlb | `elasticloadbalancing:DescribeTargetHealth` | `*` |
+| dr-check-s3 | `s3:ListBucket` `GetReplicationConfiguration` | SELF のバケット |
 | dr-check-alarms | `cloudwatch:DescribeAlarms` | `*` |
 | dr-check-workload | `eks:DescribeCluster` `sts:GetCallerIdentity` | SELF のクラスタ／`*` |
 
 注意点:
 
 - `dr-scheduler` の `iam:PassRole` は必須。`UpdateSchedule` が
-  `Target.RoleArn` を含む全パラメータを要求するため、これがないと失敗する
+  `Target.RoleArn` を含む全パラメータを要求するため、これがないと失敗する。
+  他のどの Lambda にも不要な権限なので見落としやすい
 - `dr-scheduler` の Resource は自チーム専用グループに限定する。default
   グループには他チームのスケジュールが同居しているため、権限としても外す
 - `dr-check-workload` の Pod / Node 参照権限は IAM ではなく Kubernetes RBAC
   側（EKS アクセスエントリで view 相当にマッピング）
 - S3 は SSE-S3（AES256）で SSE-C 禁止のため、KMS 関連の権限は全関数で不要
 
-## 環境変数（Terraform から注入）
+## 環境変数
 
 東京デプロイと大阪デプロイで self / peer を入れ替えて同じモジュールを呼ぶ。
 関数ごとに必要なものだけ渡してよい。
@@ -67,26 +144,24 @@ Lambda は **操作するリソース単位**で分割する。1 関数に複数
 ```hcl
 environment {
   variables = {
-    SELF_REGION               = "ap-northeast-3"
-    SELF_REST_API_ID          = var.self_rest_api_id
-    SELF_STAGE                = var.self_stage
-    SELF_HEALTH_URL           = var.self_health_url
-    SELF_SCHEDULE_GROUP       = var.self_schedule_group   # 自チーム専用グループ
-    SELF_SCHEDULE_NAME_PREFIX = ""                        # グループ内全件が対象
-    SELF_FUNCTION_NAMES       = jsonencode(var.self_function_names)
-    SELF_TABLE_NAMES          = jsonencode(var.self_table_names)
-    SELF_TARGET_GROUP_ARNS    = jsonencode(var.self_target_group_arns)
-    SELF_ALARM_PREFIX         = var.self_alarm_prefix
-    SELF_EKS_CLUSTER_NAME     = var.self_eks_cluster_name
-    SELF_EKS_NAMESPACES       = jsonencode(var.self_eks_namespaces)
-    SELF_REPLICATION_BUCKETS  = jsonencode(var.self_replication_buckets) # 案 A のみ
+    SELF_REGION              = "ap-northeast-3"
+    SELF_REST_API_ID         = var.self_rest_api_id
+    SELF_STAGE               = var.self_stage
+    SELF_HEALTH_URL          = var.self_health_url
+    SELF_SCHEDULE_GROUP      = var.self_schedule_group   # 自チーム専用グループ
+    SELF_FUNCTION_NAMES      = jsonencode(var.self_function_names)
+    SELF_TABLE_NAMES         = jsonencode(var.self_table_names)
+    SELF_TARGET_GROUP_ARNS   = jsonencode(var.self_target_group_arns)
+    SELF_ALARM_PREFIX        = var.self_alarm_prefix
+    SELF_EKS_CLUSTER_NAME    = var.self_eks_cluster_name
+    SELF_EKS_NAMESPACES      = jsonencode(var.self_eks_namespaces)
+    SELF_REPLICATION_BUCKETS = jsonencode(var.self_replication_buckets) # 案 A のみ
 
-    PEER_REGION               = "ap-northeast-1"
-    PEER_REST_API_ID          = var.peer_rest_api_id
-    PEER_STAGE                = var.peer_stage
-    PEER_SCHEDULE_GROUP       = var.peer_schedule_group
-    PEER_SCHEDULE_NAME_PREFIX = ""
-    PEER_REPLICATION_BUCKETS  = jsonencode(var.peer_replication_buckets) # 案 A のみ
+    PEER_REGION              = "ap-northeast-1"
+    PEER_REST_API_ID         = var.peer_rest_api_id
+    PEER_STAGE               = var.peer_stage
+    PEER_SCHEDULE_GROUP      = var.peer_schedule_group
+    PEER_REPLICATION_BUCKETS = jsonencode(var.peer_replication_buckets) # 案 A のみ
   }
 }
 ```
@@ -107,7 +182,7 @@ environment {
     "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2
   }],
   "Catch": [{
-    "ErrorEquals": ["BestEffortFailed"],
+    "ErrorEquals": ["ContinuableError"],
     "ResultPath": "$.fenceApiGwError",
     "Next": "FenceScheduler"
   }],
@@ -115,24 +190,36 @@ environment {
 }
 ```
 
-- 閉塞（role=peer）の失敗は `ResultPath` に記録して続行。握りつぶさず実行
-  履歴に残す。リソース単位に分かれているので、どれが閉塞できなかったかが
-  実行履歴からそのまま分かる
-- 開放（role=self）の `FatalError` は Catch しない（切替不成立なので停止）
-- 観測系 7 本は `Parallel` で並列実行し、各戻り値の `ready` を `Choice` で
-  判定する。false なら `Wait`（30 秒）→ 再実行。スケジュール有効化や
-  API GW 再デプロイの反映ラグはこのループで吸収する
-- **`dr-check-nlb` の結果だけで開放判断をしないこと**。ヘルスチェックが
-  TCP のため、`dr-check-workload` と併せて両方 ready を条件にする（後述）
+観測系は `Retry` の間隔を長くするだけでよい。**`Wait` + `Choice` の待機
+ループは不要**。`MaxAttempts` がそのまま待機上限になる。
+
+```json
+"CheckNlb": {
+  "Type": "Task",
+  "Resource": "arn:aws:states:::lambda:invoke",
+  "Parameters": {"FunctionName": "dr-check-nlb"},
+  "Retry": [{
+    "ErrorEquals": ["RetryableError"],
+    "IntervalSeconds": 30, "BackoffRate": 1.0, "MaxAttempts": 10
+  }],
+  "End": true
+}
+```
+
+- 同じ例外名でも、ステートごとに間隔と回数を別々に指定できる
+- 閉塞（role=peer）の失敗は `ResultPath` に記録して続行。リソース単位に
+  分かれているので、どれが閉塞できなかったかが実行履歴からそのまま分かる
+- 観測系 7 本は `Parallel` で並列実行する。どれか 1 つでも
+  `RetryableError` で失敗すれば Parallel 全体が失敗する
 
 ## フェーズ順序
 
 ```
-Fence(peer): apigw -> scheduler          # 失敗許容
-  [案 A のみ] s3-replication(self, enable=true)
-  [案 A のみ] s3-replication(peer,  enable=false)   # 失敗許容
+Fence(peer): apigw -> scheduler          # ContinuableError を Catch して続行
+  [案 A のみ] s3-replication(self, enabled=true)
+  [案 A のみ] s3-replication(peer,  enabled=false)   # 失敗許容
 Check(self): apigw / lambda / dynamodb / nlb / s3 / alarms / workload  # 並列
-Activate(self): scheduler -> apigw       # 失敗は致命的
+Activate(self): scheduler -> apigw       # 失敗は未捕捉 = 停止
 ```
 
 案 A の `role=self` 有効化は **必ず Activate より前**。ライブレプリケーション
@@ -171,13 +258,17 @@ tfvars で両リージョンとも `run_replication = true` に固定する。
 必要。東京 -> 大阪ルールの PENDING は宛先である大阪の CloudWatch に出るため、
 東京障害中でも大阪側から取り残し量を読める。
 
+`delete_marker_replication` は `Disabled` のまま。仕様上オブジェクト削除が
+ないため `Enabled` にする利点がなく、誤削除が両リージョンへ波及するリスク
+だけが残る。誤削除時に切替先へコピーが残ることが保護になる。
+
 ## EventBridge Scheduler
 
 イベント駆動は EventBridge **Rules ではなく Scheduler**（スケジュール）を
 使っている。`events` ではなく `scheduler` クライアントを叩く。
 
 自チーム専用のスケジュールグループが独立して存在するため、
-`SCHEDULE_GROUP` にそのグループ名を指定し、`SCHEDULE_NAME_PREFIX` は空でよい。
+`SCHEDULE_GROUP` にそのグループ名を指定すればグループ内全件が対象になる。
 default グループの他チーム分には触れない。
 
 ### UpdateSchedule の注意点
@@ -199,8 +290,7 @@ State だけを渡す API は存在しない。`UpdateSchedule` は必須パラ�
 
 NLB とターゲットグループは AWS Load Balancer Controller が Service から作成。
 **ターゲットタイプは IP**、トラフィック・ヘルスチェックとも **TCP** で、
-`HealthCheckPort` は `traffic-port`（トラフィックポートと同一番号）。
-ターゲットグループは 2 つ（Port 1 / 9116）で、現状すべて healthy。
+`HealthCheckPort` は `traffic-port`。ターゲットグループは 2 つ（Port 1 / 9116）。
 
 IP モードでは NLB が Pod IP へ直接トラフィックを送るため、トラフィックは
 kube-proxy を経由せず、`externalTrafficPolicy` は判定に関係しない。
@@ -209,27 +299,16 @@ Controller は Endpoints / EndpointSlices からターゲットを解決し、�
 
     登録されているターゲット ≒ Ready な Pod
 
-### 判定
-
 `dr-check-nlb` は「登録済みのターゲットがすべて健全か」だけを見る。
 
     unhealthy == 0  かつ  initial == 0  かつ  healthy >= 1
 
-**必要数を満たしているかの判定は `dr-check-workload` に一本化**している。
-必要数を外から与える設定（`MIN_HEALTHY_TARGETS`）は持たない。Deployment 自身が
-`spec.replicas` を持っているため、設定と実態がずれる余地を作らない。
-これにより、2 つのターゲットグループが別々の Deployment を向いているか
-どうかを気にする必要もなくなる。
+必要数を満たしているかの判定は `dr-check-workload` に一本化している。
+`initial` を許容しないのは、EndpointSlice の更新が ELB のターゲット登録より
+速く進むため、早すぎる開放を防ぐ必要があるから。
 
-`initial`（登録処理が進行中）を許容しないのは、早すぎる開放を防ぐため。
-EndpointSlice の更新は ELB のターゲット登録より速く進むので、Pod が Ready
-でも NLB 側が `initial` のままの時間がある。
-
-### dr-check-workload との併用
-
-Step Functions の `Choice` は両方が `ready: true` であることを条件にする。
 Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグループに
-現れないため、`dr-check-nlb` だけでは判定材料が足りない。
+現れないため、`dr-check-workload` との併用が前提。
 
 ## EKS ワークロードの判定
 
@@ -238,23 +317,21 @@ Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグル�
 
 - 必要数は Deployment 自身が持っているので設定値として与えない
 - Deployment 名も列挙するため、設定は namespace のリストだけで済む
-- `status.replicas`（作成済み数）ではなく `ready_replicas` を見る。前者では
-  Pod が起動しただけで readinessProbe を通っていない状態を通してしまう
+- `status.replicas`（作成済み数）ではなく `ready_replicas` を見る
 
 検出できないもの: 「本来 3 のはずが `spec.replicas` が 1 になっている」ような
-平時の構成ドリフト。切替の瞬間に気づいても打つ手がない種類の問題なので、
-dry_run の定期実行や Terraform のドリフト検知で拾う。
+平時の構成ドリフト。切替の瞬間に気づいても打つ手がないので、dry_run の
+定期実行や Terraform のドリフト検知で拾う。
 
-## check_workload の依存
+## check_workload の接続方式
 
 既存の Pod 再起動 Lambda と同じ方式（`aws eks update-kubeconfig`）を使う。
 
-- AWS CLI と `kubernetes` パッケージを Layer またはコンテナイメージに同梱
+- CA 証明書とトークン取得は CLI が肩代わりするため、Python 側の実装は不要
+  （kubeconfig の exec プラグインが `aws eks get-token` を都度実行する）
 - クラスタ API エンドポイントはプライベートのみのため、到達可能な
   VPC・サブネット・セキュリティグループに配置する（既存 Lambda と同じ設定）
 - 実行ロールを EKS アクセスエントリで view 相当にマッピングする
-- CA 証明書とトークン取得は CLI が肩代わりするため、Python 側の実装は不要
-  （kubeconfig の exec プラグインが `aws eks get-token` を都度実行する）
 
 ## タイムアウト
 
@@ -267,10 +344,3 @@ dry_run の定期実行や Terraform のドリフト検知で拾う。
 行う。EventBridge Scheduler で週次実行すれば、IAM 権限不足や設定漏れを平時に
 検出できる（訓練時にしか動かないコードの潜伏対策）。特に `dr-scheduler` の
 `iam:PassRole` は見落としやすいので、ここで早期に検証する。
-
-## 未確認の前提（要確認）
-
-- **SQS のコンシューマ** … Lambda のイベントソースマッピングで消費している
-  前提で `dr-check-lambda` に ESM 確認を入れている。EKS Pod 側でポーリング
-  しているなら、この確認は無意味
-- **S3 の案 A / 案 B** … 未確定のため両対応

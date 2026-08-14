@@ -11,13 +11,26 @@
         PEER = 相手リージョン = これまで ACTIVE だった側 = 閉塞する対象
     となり、切替方向は「どのリージョンの Step Functions を叩いたか」で
     一意に決まる。入力に direction を持たせない（取り違え事故が起きない）。
+
+エラー処理の契約:
+    Step Functions が区別する必要があるのは 2 つだけ。
+
+        RetryableError    一時的。待てば直る          -> Retry
+        ContinuableError  失敗したが作業継続してよい  -> Catch
+
+    それ以外の例外は型を定義せずそのまま送出する。Retry にも Catch にも
+    マッチしない例外は Step Functions がワークフローを失敗させるため、
+    「止める」ためだけの独自例外は不要。設定不備や権限不足はバグであり、
+    未捕捉例外として止まるのが正しい挙動。
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cache
@@ -26,46 +39,61 @@ from typing import Any, Literal, NoReturn
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-logger = logging.getLogger(__name__)
-logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
-
 Role = Literal["self", "peer"]
 
 # boto3 が送出しうる例外の総称。これ以外（KeyError 等）は自分のコードの
-# バグなので握りつぶさず、そのまま送出させる。
+# バグなので分類せず、そのまま送出させる。
 AWS_ERRORS = (ClientError, BotoCoreError)
 
 
-# ---------------------------------------------------------------------------
-# 例外設計
-#
-#   ConfigError      : 環境変数の不備。デプロイ時の設定ミス。
-#   RetryableError   : 一時的な失敗。Step Functions の Retry で再試行させる。
-#   BestEffortFailed : 旧 ACTIVE 側（PEER）の操作失敗。Catch で記録して続行。
-#                      リージョン障害中は PEER のコントロールプレーンが
-#                      応答しないため、閉塞失敗はワークフローを止めない。
-#   FatalError       : 新 ACTIVE 側（SELF）の操作失敗。切替そのものが
-#                      成立しないので、ワークフローを止める。
-#
-# 観測系 Lambda（check_*）はこれらを投げず、結果を dict で返す。
-# 「制御フローの分岐材料は戻り値、失敗は例外」の切り分け。
-# ---------------------------------------------------------------------------
+class _JsonFormatter(logging.Formatter):
+    """コンテナイメージデプロイのため Layer が使えず、ランタイムのログ形式
+    設定にも依存しないよう、フォーマッタを自前で持つ。
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        extra = getattr(record, "extra", None)
+        if extra:
+            payload.update(extra)
+        return json.dumps(payload, ensure_ascii=False)
 
 
-class ConfigError(Exception):
-    """環境変数の不足・不正。"""
+def get_logger(name: str) -> logging.Logger:
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(_JsonFormatter())
+        logger.addHandler(handler)
+        logger.propagate = False
+    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+    return logger
+
+
+logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 例外
+# ---------------------------------------------------------------------------
 
 
 class RetryableError(Exception):
-    """スロットリング等の一時エラー。SFN の Retry 対象。"""
+    """一時的な失敗、または「まだ収束していない」状態。SFN の Retry 対象。"""
 
 
-class BestEffortFailed(Exception):
-    """PEER 側操作の恒久的失敗。SFN の Catch で記録して続行。"""
+class ContinuableError(Exception):
+    """旧 ACTIVE 側の操作失敗。SFN の Catch で記録して続行する。
 
-
-class FatalError(Exception):
-    """SELF 側操作の失敗。ワークフローを停止させる。"""
+    リージョン障害中は PEER のコントロールプレーンが応答しないため、
+    閉塞の失敗はワークフローを止めない。
+    """
 
 
 RETRYABLE_CODES = frozenset({
@@ -83,34 +111,32 @@ RETRYABLE_CODES = frozenset({
 
 
 def raise_classified(exc: Exception, *, role: Role, what: str) -> NoReturn:
-    """AWS 例外を Retryable / BestEffortFailed / FatalError に振り分けて送出する.
+    """AWS 例外を SFN が扱える形に振り分けて送出する.
 
-    role が "peer"（閉塞対象）なら失敗許容、"self"（開放対象）なら致命的。
-    必ず送出するため戻り値型は NoReturn。
+    スロットリング等   -> RetryableError
+    PEER 側の恒久エラー -> ContinuableError（閉塞失敗は許容する）
+    SELF 側の恒久エラー -> 元の例外をそのまま送出（未捕捉 = ワークフロー停止）
     """
     code = ""
     if isinstance(exc, ClientError):
         code = exc.response.get("Error", {}).get("Code", "")
 
-    if code in RETRYABLE_CODES and code:
+    if code in RETRYABLE_CODES:
         logger.warning("retryable error: %s: %s", what, exc)
         raise RetryableError(f"{what}: {code}: {exc}") from exc
 
     if role == "peer":
-        # 旧 ACTIVE 側は障害中で到達不能な可能性がある。想定内。
-        logger.warning("best-effort operation failed: %s: %s", what, exc)
-        raise BestEffortFailed(f"{what}: {code or type(exc).__name__}: {exc}") from exc
+        logger.warning("fencing failed, continuing: %s: %s", what, exc)
+        raise ContinuableError(f"{what}: {code or type(exc).__name__}: {exc}") from exc
 
-    logger.error("fatal error on new active region: %s: %s", what, exc)
-    raise FatalError(f"{what}: {code or type(exc).__name__}: {exc}") from exc
+    logger.error("operation failed on new active region: %s: %s", what, exc)
+    # 元の例外をそのまま送出する。裸の raise は except ブロック内でしか
+    # 動かず、呼び出し側の例外コンテキストに暗黙依存するため使わない。
+    raise exc
 
 
 # ---------------------------------------------------------------------------
 # 設定（環境変数）
-#
-# Terraform から SELF_* / PEER_* を注入する。東京デプロイと大阪デプロイで
-# self / peer を入れ替えて同じモジュールを呼ぶだけでよい。
-# リスト・マップは JSON 文字列で渡す。
 # ---------------------------------------------------------------------------
 
 
@@ -118,18 +144,13 @@ def _env(role: Role, key: str, default: str | None = None) -> str:
     name = f"{role.upper()}_{key}"
     value = os.environ.get(name, default)
     if value is None:
-        raise ConfigError(f"environment variable not set: {name}")
+        raise KeyError(f"environment variable not set: {name}")
     return value
 
 
 def _env_json(role: Role, key: str, default: Any) -> Any:
     raw = os.environ.get(f"{role.upper()}_{key}")
-    if not raw:
-        return default
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"invalid JSON in {role.upper()}_{key}: {exc}") from exc
+    return json.loads(raw) if raw else default
 
 
 @dataclass(frozen=True)
@@ -138,41 +159,34 @@ class RegionConfig:
 
     role: Role
     region: str
-    rest_api_id: str
-    stage: str
-    # EventBridge Scheduler のスケジュールグループ（自チーム専用グループ）
-    schedule_group: str = "default"
-    # 切替対象スケジュールの接頭辞。未設定ならグループ内の全件が対象になる。
-    schedule_name_prefix: str = ""
+    rest_api_id: str = ""
+    stage: str = ""
     health_url: str | None = None
+    schedule_group: str = "default"
     function_names: list[str] = field(default_factory=list)
     table_names: list[str] = field(default_factory=list)
     target_group_arns: list[str] = field(default_factory=list)
     alarm_prefix: str = ""
-    eks_cluster_name: str | None = None
+    eks_cluster_name: str = ""
     # 確認対象の namespace。Deployment 名と必要数はクラスタから読むため不要。
     eks_namespaces: list[str] = field(default_factory=list)
     hybrid_node_selector: str = "eks.amazonaws.com/compute-type=hybrid"
-    # 案 A（切替時に Status をトグル）でのみ使う。案 B では空でよい。
     replication_buckets: list[str] = field(default_factory=list)
 
 
 def config(role: Role) -> RegionConfig:
-    if role not in ("self", "peer"):
-        raise ConfigError(f"invalid role: {role}")
     return RegionConfig(
         role=role,
         region=_env(role, "REGION"),
-        rest_api_id=_env(role, "REST_API_ID"),
-        stage=_env(role, "STAGE"),
-        schedule_group=_env(role, "SCHEDULE_GROUP", "default"),
-        schedule_name_prefix=_env(role, "SCHEDULE_NAME_PREFIX", ""),
+        rest_api_id=_env(role, "REST_API_ID", ""),
+        stage=_env(role, "STAGE", ""),
         health_url=os.environ.get(f"{role.upper()}_HEALTH_URL"),
+        schedule_group=_env(role, "SCHEDULE_GROUP", "default"),
         function_names=_env_json(role, "FUNCTION_NAMES", []),
         table_names=_env_json(role, "TABLE_NAMES", []),
         target_group_arns=_env_json(role, "TARGET_GROUP_ARNS", []),
         alarm_prefix=_env(role, "ALARM_PREFIX", ""),
-        eks_cluster_name=os.environ.get(f"{role.upper()}_EKS_CLUSTER_NAME"),
+        eks_cluster_name=_env(role, "EKS_CLUSTER_NAME", ""),
         eks_namespaces=_env_json(role, "EKS_NAMESPACES", []),
         hybrid_node_selector=_env(
             role, "HYBRID_NODE_SELECTOR", "eks.amazonaws.com/compute-type=hybrid"),
@@ -189,37 +203,61 @@ def client(service: str, region: str):
     return boto3.client(service, region_name=region)
 
 
-def account_id(context) -> str:
-    """STS を呼ばずに Lambda の ARN からアカウント ID を取り出す。"""
-    # arn:aws:lambda:<region>:<account-id>:function:<name>
-    return context.invoked_function_arn.split(":")[4]
-
-
 # ---------------------------------------------------------------------------
-# 観測系 Lambda の共通処理
+# ハンドラのデコレータ（横断的関心事）
 # ---------------------------------------------------------------------------
 
 
-def guard(name: str, fn: Callable[..., dict], *args, **kwargs) -> dict:
-    """個別チェックを隔離する。失敗は結果に含めるだけで送出しない.
+def ops_handler(action: str) -> Callable:
+    """操作系ハンドラ用。role の解決・設定読み込み・ログ・応答整形を担う.
 
-    1 つの API エラーで全項目が見えなくなると、保守者が原因を切り分け
-    られないため。握りつぶす代わりに必ずログへ残す。
+    デコレートされる関数のシグネチャ:
+        fn(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict
     """
-    try:
-        return fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - 観測系は何があっても結果を返す
-        logger.exception("check failed: %s", name)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    def decorator(fn: Callable[..., dict]) -> Callable[[dict, Any], dict]:
+        @functools.wraps(fn)
+        def wrapper(event: dict, context) -> dict:
+            role: Role = event["role"]
+            dry_run = bool(event.get("dry_run", False))
+            cfg = config(role)
+            logger.info("%s start: role=%s region=%s dry_run=%s",
+                        action, role, cfg.region, dry_run)
+            result = fn(cfg, event, dry_run=dry_run, context=context)
+            logger.info("%s done: %s", action, json.dumps(result, default=str))
+            return {"action": action, "role": role,
+                    "region": cfg.region, "dry_run": dry_run, **result}
+
+        return wrapper
+
+    return decorator
 
 
-def check_result(check: str, region: str, detail: dict[str, dict]) -> dict:
-    """観測系 Lambda の戻り値エンベロープを一元化する.
+def check_handler(name: str) -> Callable:
+    """観測系ハンドラ用。SELF 固定で実行し、未収束なら RetryableError を送出.
 
-    合否は返すが例外は投げない。判定と分岐は Step Functions の Choice に任せる。
+    デコレートされる関数のシグネチャ:
+        fn(cfg: RegionConfig) -> dict   # 「問題のある項目」だけを返す
+
+    正常時は何も返さない。問題があった項目だけを例外に載せるため、
+    項目ごとの ok フラグは持たない（例外に載る = NG が自明）。
+    AWS API のエラーは握りつぶさず素通しさせる。権限不足やリソース不在は
+    バグであり、待っても直らないので止まるのが正しい。
     """
-    ready = all(item.get("ok") for item in detail.values())
-    result = {"check": check, "region": region, "ready": ready, "detail": detail}
-    logger.info("check=%s region=%s ready=%s ng=%s", check, region, ready,
-                [k for k, v in detail.items() if not v.get("ok")])
-    return result
+
+    def decorator(fn: Callable[[RegionConfig], dict]) -> Callable[[dict, Any], None]:
+        @functools.wraps(fn)
+        def wrapper(event: dict, context) -> None:
+            cfg = config("self")
+            logger.info("check %s start: region=%s", name, cfg.region)
+            problems = fn(cfg)
+            if problems:
+                message = json.dumps({name: problems}, ensure_ascii=False,
+                                     default=str)
+                logger.warning("check %s not ready: %s", name, message)
+                raise RetryableError(message)
+            logger.info("check %s ok: region=%s", name, cfg.region)
+
+        return wrapper
+
+    return decorator

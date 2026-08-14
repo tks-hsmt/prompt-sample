@@ -1,7 +1,7 @@
 """dr-check-dynamodb: 新 ACTIVE 側の DynamoDB テーブルが使える状態か確認する.
 
 ===========================================================================
-必要な IAM 権限（この Lambda のみ）
+必要な IAM 権限
 ---------------------------------------------------------------------------
     dynamodb:DescribeTable   arn:aws:dynamodb:<SELF>:<acct>:table/<対象>
 
@@ -13,24 +13,20 @@
 テーブルが使える状態かだけを見る。
 
 入力 : {}
-出力 : {"check": "dynamodb", "region": "...", "ready": bool, "detail": {...}}
+出力 : 正常時は無し / 未収束なら RetryableError
 """
 
 from __future__ import annotations
 
-from common import RegionConfig, check_result, client, config, guard
+from common import RegionConfig, check_handler, client
 
 
-def check_dynamodb(cfg: RegionConfig) -> dict:
+@check_handler("dynamodb")
+def handler(cfg: RegionConfig) -> dict:
     ddb = client("dynamodb", cfg.region)
-    tables = {}
-    for name in cfg.table_names:
-        status = ddb.describe_table(TableName=name)["Table"]["TableStatus"]
-        tables[name] = {"status": status, "ok": status == "ACTIVE"}
-    return {"ok": all(t["ok"] for t in tables.values()), "tables": tables}
-
-
-def handler(event: dict, context) -> dict:
-    cfg = config("self")
-    return check_result("dynamodb", cfg.region,
-                        {"dynamodb": guard("dynamodb", check_dynamodb, cfg)})
+    return {
+        name: {"status": status}
+        for name in cfg.table_names
+        if (status := ddb.describe_table(
+            TableName=name)["Table"]["TableStatus"]) != "ACTIVE"
+    }
