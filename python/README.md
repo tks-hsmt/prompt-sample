@@ -17,11 +17,19 @@ Step Functions が区別する必要があるのは 2 つだけ。
 
 `raise_classified()` の振り分け:
 
-| role | エラー | 結果 |
+| best_effort | エラー | 結果 |
 |---|---|---|
-| any | スロットリング等 | `RetryableError` |
-| peer | その他の AWS エラー | `ContinuableError` |
-| self | その他の AWS エラー | 元の例外をそのまま送出（停止） |
+| — | スロットリング・接続断・タイムアウト | `RetryableError` |
+| `True` | その他の AWS エラー | `ContinuableError` |
+| `False` | その他の AWS エラー | 元の例外をそのまま送出（停止） |
+
+`best_effort` は**操作の性質**。閉塞は失敗しても切替を続けるため `True`、
+開放は失敗したら切替が成立しないため `False`。ハンドラの宣言に書く。
+
+```python
+@ops_handler("apigw-block",  ApiGatewayConfig, best_effort=True)
+@ops_handler("apigw-enable", ApiGatewayConfig, best_effort=False)
+```
 
 AWS SDK 以外の例外（`KeyError` 等）は分類せず素通しさせる。自分のコードの
 バグをインフラ障害に化けさせないため。
@@ -40,7 +48,7 @@ AWS 例外の `try/except` は `@ops_handler` の中だけに置き、個々の�
 ### 複数インスタンスのループは `run_per_item` に統一
 
 操作系の Lambda は「リソース種別」を担当し、その中の個別インスタンス
-（バケット、スケジュール）はループで処理する。`common.run_per_item()` が
+（バケット、スケジュール）はループで処理する。`dr_switch.core.errors.run_per_item()` が
 その集約を担う。
 
 - **1 件失敗しても残りを必ず試みる。** 最初の失敗で中断すると、止められた
@@ -52,24 +60,24 @@ AWS 例外の `try/except` は `@ops_handler` の中だけに置き、個々の�
   するため、内側の `except` に捕まらず即座に停止する
 - 自分のコードのバグ（`KeyError` 等）は分類せず素通し
 
-`scheduler_ops` と `s3_replication` は同じ性質の操作なので、同じヘルパを使う。
+`dr_switch.scheduler` と `dr_switch.s3` は同じ性質の操作なので、同じヘルパを使う。
 一覧取得（`list_schedules`）の失敗は 1 件の失敗ではないので、ループの外に
 置いて `@ops_handler` に分類させる。
 
-観測系の `check_*` は揃えない。AWS エラーが出るのは権限不足やリソース不在＝
+観測系の check ハンドラは揃えない。AWS エラーが出るのは権限不足やリソース不在＝
 バグで、続けても意味がないため中断が妥当。「未収束」の問題はループが正常に
 回りきってから全件まとめて送出するので、集約は既に効いている。
 
 ## 横断処理はデコレータ
 
-`common.py` の 2 つのデコレータが、role 解決・設定読み込み・ログ・応答整形・
+`dr_switch/core/middleware.py` の 2 つのデコレータが、設定読み込み・ログ・応答整形・
 例外送出を担う。各ハンドラは自分の確認内容だけを書く。
 
-### 観測系 `@check_handler(name)`
+### 観測系 `@check_handler(name, ConfigCls)`
 
 ```python
-@check_handler("nlb")
-def handler(cfg: RegionConfig) -> dict:
+@check_handler("nlb", NlbConfig)
+def check(cfg: NlbConfig) -> dict:
     return problems   # 問題のある項目だけを返す。正常なら {}
 ```
 
@@ -79,11 +87,11 @@ def handler(cfg: RegionConfig) -> dict:
 - AWS API のエラーは握りつぶさず素通し。権限不足やリソース不在はバグであり、
   待っても直らないので止まるのが正しい
 
-### 操作系 `@ops_handler(action)`
+### 操作系 `@ops_handler(action, ConfigCls, best_effort=...)`
 
 ```python
-@ops_handler("apigw")
-def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
+@ops_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
+def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
     return {"changed": True, ...}
 ```
 
@@ -91,140 +99,174 @@ def handler(cfg: RegionConfig, event: dict, *, dry_run: bool, context) -> dict:
 
 ## 構成
 
-Lambda は**操作するリソース単位**で分割する。各ファイルの docstring 冒頭に
-必要な IAM 権限を明記している。
+**リソース単位のパッケージ**に統一する。1 つのリソースに関する設定・閉塞・
+開放・確認がすべて同じディレクトリに集まり、リソースを追加するときに増えるのは
+ディレクトリ 1 つになる。
 
-| # | 関数 | ファイル | 対象リソース | 種別 | 対象リージョン |
-|---|---|---|---|---|---|
-| 1 | dr-apigw | `apigw.py` | API Gateway | 変更 | 引数（self/peer） |
-| 2 | dr-scheduler | `scheduler_ops.py` | EventBridge Scheduler | 変更 | 引数（self/peer） |
-| 3 | dr-s3-replication | `s3_replication.py` | S3 レプリケーション | 変更 | 引数（self/peer） |
-| 4 | dr-check-apigw | `check_apigw.py` | API Gateway | 観測 | SELF |
-| 5 | dr-check-lambda | `check_lambda.py` | Lambda | 観測 | SELF |
-| 6 | dr-check-dynamodb | `check_dynamodb.py` | DynamoDB | 観測 | SELF |
-| 7 | dr-check-nlb | `check_nlb.py` | NLB | 観測 | SELF |
-| 8 | dr-check-s3 | `check_s3.py` | S3 | 観測 | SELF |
-| 9 | dr-check-alarms | `check_alarms.py` | CloudWatch | 観測 | SELF |
-| 10 | dr-check-workload | `check_workload.py` | EKS Pod / Hybrid Node | 観測 | SELF |
+```
+dr_switch/
+  core/                    # リソースに依存しない共通部分
+    aws.py                 # boto3 クライアント（BOTO_CONFIG）
+    config.py              # 環境変数ヘルパと BaseConfig
+    errors.py              # 例外の分類と集約（run_per_item を含む）
+    middleware.py          # ops_handler / check_handler
+  apigateway/
+    config.py  handlers.py    # block / enable / check
+  scheduler/
+    config.py  handlers.py    # block / enable
+  s3/
+    config.py  handlers.py    # block / enable / check
+  lambda_function/
+    config.py  handlers.py    # check
+  dynamodb/
+    config.py  handlers.py    # check
+  nlb/
+    config.py  handlers.py    # check
+  cloudwatch/
+    config.py  handlers.py    # check
+  eks/
+    config.py  handlers.py    # check
+tests/
+Dockerfile
+```
 
-`dr-s3-replication` は **S3 案 A を採用する場合のみ**デプロイする（後述）。
+### ディレクトリ名の規則
 
-10 本とも東京・大阪の**両リージョンにデプロイ**する。実行するのは常に
-これから ACTIVE になる側。切替方向は「どのリージョンの Step Functions を
-叩いたか」で決まるため、入力に direction を持たない。
+**boto3 のクライアント名**を使う。コード中の `client("apigateway", ...)` と
+ディレクトリ名が一致し、恣意的な略語を作らずに済む。例外は 2 つ。
 
-作らないもの:
-
-- SQS ドレイン確認 … 障害時は待っても解消しないため実施しない
-- スケールアップ … 両リージョン同レプリカ数のため不要
-
-### 共通モジュール
-
-| ファイル | 責務 |
+| ディレクトリ | 理由 |
 |---|---|
-| `config.py` | リソース単位の設定クラスと環境変数の読み込み |
-| `errors.py` | 例外定義、`classify()` / `raise_classified()` |
-| `aws.py` | `BOTO_CONFIG`（タイムアウト・リトライ）と `client()` |
-| `logging_json.py` | JSON フォーマッタとロガー設定 |
-| `handlers.py` | `ops_handler` / `check_handler` / `run_per_item` |
+| `lambda_function` | `lambda` は Python の予約語。PEP 8 は予約語衝突の回避として「同義語を使う」を最善、「末尾アンダースコア」を次善、「略語や綴りの改変」を最悪としており、最善を採った |
+| `nlb` | boto3 名の `elbv2` は API 名で確認対象（NLB のターゲットグループ）を表さない。NLB は AWS 自身が使う略称 |
 
-`classify()` は分類結果を**返す**（送出しない）。`run_per_item` が
-「分類はしたいが今は送出したくない」ため、入れ子の try/except を避けられる。
-単に送出したい場合は `raise_classified()` を使う。
+自分で略語を作らない、という規則。S3 / EKS / NLB は AWS の公式表記なのでそのまま使う。
 
-### 設定クラスはリソース単位
+### ハンドラ
 
-Lambda をリソース単位に分割しているので、設定クラスも同じ単位で分ける。
-`BaseConfig`（role + region）を基底に、各リソース用のクラスが必要な項目だけを持つ。
+| 関数 | ハンドラ | 種別 | 対象リージョン |
+|---|---|---|---|
+| dr-apigateway-block | `dr_switch.apigateway.handlers.block` | 変更 | 閉塞対象 |
+| dr-apigateway-enable | `dr_switch.apigateway.handlers.enable` | 変更 | 自リージョン |
+| dr-apigateway-check | `dr_switch.apigateway.handlers.check` | 観測 | 自リージョン |
+| dr-scheduler-block | `dr_switch.scheduler.handlers.block` | 変更 | 閉塞対象 |
+| dr-scheduler-enable | `dr_switch.scheduler.handlers.enable` | 変更 | 自リージョン |
+| dr-s3-block | `dr_switch.s3.handlers.block` | 変更 | 閉塞対象 |
+| dr-s3-enable | `dr_switch.s3.handlers.enable` | 変更 | 自リージョン |
+| dr-s3-check | `dr_switch.s3.handlers.check` | 観測 | 自リージョン |
+| dr-lambda-check | `dr_switch.lambda_function.handlers.check` | 観測 | 自リージョン |
+| dr-dynamodb-check | `dr_switch.dynamodb.handlers.check` | 観測 | 自リージョン |
+| dr-nlb-check | `dr_switch.nlb.handlers.check` | 観測 | 自リージョン |
+| dr-cloudwatch-check | `dr_switch.cloudwatch.handlers.check` | 観測 | 自リージョン |
+| dr-eks-check | `dr_switch.eks.handlers.check` | 観測 | 自リージョン |
 
-| クラス | 固有フィールド | 使う Lambda |
-|---|---|---|
-| `BaseConfig` | （role, region のみ） | — |
-| `ApiGatewayConfig` | rest_api_id, stage, throttle_rate, throttle_burst, health_url | dr-apigw, dr-check-apigw |
-| `SchedulerConfig` | schedule_group | dr-scheduler |
-| `S3Config` | replication_buckets | dr-s3-replication, dr-check-s3 |
-| `LambdaConfig` | function_names | dr-check-lambda |
-| `DynamoDbConfig` | table_names | dr-check-dynamodb |
-| `NlbConfig` | target_group_arns | dr-check-nlb |
-| `AlarmConfig` | alarm_prefix | dr-check-alarms |
-| `EksConfig` | clusters（`ClusterConfig` のリスト） | dr-check-workload |
+`dr_switch.s3.handlers` の block / enable は **S3 案 A を採用する場合のみ**デプロイする。
 
-生成は `<Cls>.from_env(role)`。デコレータに設定クラスを渡す。
+閉塞と開放を別関数に分けているため、入力は `{"dry_run": bool}` のみ
+（`apigateway.enable` だけ任意で `throttle` を受ける）。どちらのリージョンを
+対象にするかは環境変数で決まる。
+
+### core のファサード
+
+`dr_switch/core/__init__.py` が公開する名前を再エクスポートする。各リソースの
+import が 1 行で済む。
 
 ```python
+from dr_switch.core import check_handler, client
+```
+
+**`dr_switch/core/` の内部は必ずフルパスで import する**（`from
+dr_switch.core.errors import ...`）。ファサード経由にすると、`__init__.py` が
+サブモジュールを読み込む途中で参照が発生し、依存が一方向でも
+「partially initialized module」の循環エラーになる。しかも `__init__.py` の
+記述順によって発生したりしなかったりする。
+
+なおこれは特別なルールではなく、PEP 8 が推奨する絶対 import そのもの。
+
+### handlers.py に配線とロジックを同居させる理由
+
+AWS が明文化しているのは「ハンドラをコアロジックから分離する」で、これが
+要求しているのは**関数の分離**であってファイルの分離ではない。デコレータで
+包まれた関数の中身には `__wrapped__` で到達できるため、テスト可能性は
+満たされる。
+
+`service.py` を別ファイルにするかは SRP（変更理由の分離）で判断できるが、
+20〜40 行のモジュールでは判定できる規模にない。`handlers.py` が 100 行を
+超えたリソースが出てきたら、そのとき判断材料が揃う。
+
+### ログ
+
+ログの初期化と呼び出しコンテキストの注入は、既存の共通モジュール
+`common_logger` の `setup_logging` / `inject_lambda_context` に委ねる。
+`middleware.py` は標準の `logging.getLogger(__name__)` を使うだけで、
+ロガーの設定は行わない。
+
+```python
+@inject_lambda_context
 @check_handler("nlb", NlbConfig)
-def handler(cfg: NlbConfig) -> dict:
+def check(cfg: NlbConfig) -> dict:
     ...
 ```
 
-**必須項目を必須として宣言できる**のが最大の利点。単一の設定クラスを全 Lambda で
-共有していたときは、ある Lambda に必須の項目でも他には不要なのですべて省略可能に
-せざるを得ず、設定漏れを検出できなかった（`REST_API_ID` が空文字のまま API を
-叩いて分かりにくいエラーになる）。分割後は `from_env` の時点で
-`environment variable not set: SELF_REST_API_ID` で止まる。
-
-必須は `REGION` に加えて、`REST_API_ID` / `STAGE`（ApiGatewayConfig）、
-`SCHEDULE_GROUP`（SchedulerConfig）、`EKS_CLUSTER_NAME`（EksConfig）。
+`inject_lambda_context` は `check_handler` の**外側**に置く。内側に置くと
+シグネチャが合わず実行時に TypeError になる。
 
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
-10 本で同一イメージを共有し、ハンドラだけ変える。
+13 本で同一イメージを共有し、ハンドラだけ変える。
 
 ```hcl
-resource "aws_lambda_function" "check_nlb" {
+resource "aws_lambda_function" "nlb_check" {
   package_type = "Image"
   image_uri    = "${aws_ecr_repository.dr.repository_url}:${var.image_tag}"
   image_config {
-    command = ["check_nlb.handler"]
+    command = ["dr_switch.nlb.handlers.check"]
   }
   # ...
 }
 ```
 
-`check_workload` のみ VPC 設定が必要（既存の Pod 再起動 Lambda と同じ
+`dr_switch.eks` のみ VPC 設定が必要（既存の Pod 再起動 Lambda と同じ
 サブネット・セキュリティグループ）。イメージには AWS CLI と
 `kubernetes` パッケージを同梱している。
 
-ログは `logging_json.py` の JSON フォーマッタで構造化する。ランタイムのログ形式
-設定にも Powertools にも依存しない。
-
-**ルートロガーに設定している**ため、botocore / urllib3 / kubernetes など
-ライブラリのログも同じ JSON 形式で出る。CloudWatch Logs Insights で JSON
-フィールドを条件にクエリしたときに、ライブラリのログ行だけパースできない
-という事態を避けるため。ライブラリのログレベルは既定で `WARNING`
-（`LIBRARY_LOG_LEVEL`）、アプリは `INFO`（`LOG_LEVEL`）。
-
-`logger.info("msg", extra={"bucket": "b1"})` の独自フィールドも JSON に出る。
+ログは既存の共通モジュール `common_logger` に委ねる（前述）。
 
 ## IAM（リソース単位）
 
-観測系（4〜10）はすべて読み取り専用ロールにできる。変更系（1〜3）とは
+観測系（7〜13）はすべて読み取り専用ロールにできる。変更系（1〜6）とは
 必ずロールを分けること。
+
+関数を block / enable に分けたことで、**各関数の Resource は片側リージョン
+だけで済む**。
 
 | 関数 | 必要なアクション | Resource |
 |---|---|---|
-| dr-apigw | `apigateway:GET` `apigateway:PATCH` | **両リージョン**の `/restapis/<id>/stages/<stage>` |
+| dr-apigw-block | `apigateway:GET` `apigateway:PATCH` | **大阪**（閉塞対象）の `/restapis/<id>/stages/<stage>` |
+| dr-apigw-enable | `apigateway:GET` `apigateway:PATCH` | **東京**（自リージョン）の `/restapis/<id>/stages/<stage>` |
 
 東京・大阪は同一 AWS アカウント。両リージョンのリソースを同じ実行ロールで
 操作できることを前提にしている。
 
-| dr-scheduler | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **両リージョン**の自チームグループのみ／スケジュール実行ロール |
-| dr-s3-replication | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **両リージョン**のバケット／レプリケーションロール |
+| dr-scheduler-block | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **閉塞対象リージョン**の自チームグループのみ／スケジュール実行ロール |
+| dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
+| dr-s3-replication-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象リージョン**のバケット／レプリケーションロール |
+| dr-s3-replication-enable | 同上 | **自リージョン**のバケット／レプリケーションロール |
 | dr-check-apigw | `apigateway:GET` | SELF の `/restapis/<id>/stages/<stage>` |
 | dr-check-lambda | `lambda:GetFunction` `ListEventSourceMappings` | SELF の対象関数／ESM は `*` |
 | dr-check-dynamodb | `dynamodb:DescribeTable` | SELF の対象テーブル |
 | dr-check-nlb | `elasticloadbalancing:DescribeTargetHealth` | `*` |
 | dr-check-s3 | `s3:ListBucket` `GetReplicationConfiguration` | SELF のバケット |
 | dr-check-alarms | `cloudwatch:DescribeAlarms` | `*` |
-| dr-check-workload | `eks:DescribeCluster` `sts:GetCallerIdentity` | SELF のクラスタ／`*` |
+| dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 
 注意点:
 
-- `dr-scheduler` の `iam:PassRole` は必須。`UpdateSchedule` が
+- `dr-scheduler-*` の `iam:PassRole` は必須。`UpdateSchedule` が
   `Target.RoleArn` を含む全パラメータを要求するため、これがないと失敗する。
   他のどの Lambda にも不要な権限なので見落としやすい
-- `dr-scheduler` の Resource は自チーム専用グループに限定する。default
+- `dr-scheduler-*` の Resource は自チーム専用グループに限定する。default
   グループには他チームのスケジュールが同居しているため、権限としても外す
 - `dr-check-workload` の Pod / Node 参照権限は IAM ではなく Kubernetes RBAC
   側（EKS アクセスエントリで view 相当にマッピング）
@@ -232,33 +274,46 @@ resource "aws_lambda_function" "check_nlb" {
 
 ## 環境変数
 
-東京デプロイと大阪デプロイで self / peer を入れ替えて同じモジュールを呼ぶ。
-関数ごとに必要なものだけ渡してよい。
+各 Lambda には、その関数が操作・確認する**対象の値だけ**を渡す。閉塞系には
+相手リージョンの値、開放系と観測系には自リージョンの値。どちらを渡すかは
+Terraform 側で決まるため、コードは自他を区別しない
+（`SELF_` / `PEER_` のプレフィックスは持たない）。
 
 ```hcl
-environment {
-  variables = {
-    SELF_REGION              = "ap-northeast-3"
-    SELF_REST_API_ID         = var.self_rest_api_id         # ApiGatewayConfig で必須
-    SELF_STAGE               = var.self_stage               # ApiGatewayConfig で必須
-    SELF_HEALTH_URL          = var.self_health_url
-    SELF_SCHEDULE_GROUP      = var.self_schedule_group      # SchedulerConfig で必須
-    SELF_FUNCTION_NAMES      = jsonencode(var.self_function_names)
-    SELF_TABLE_NAMES         = jsonencode(var.self_table_names)
-    SELF_TARGET_GROUP_ARNS   = jsonencode(var.self_target_group_arns)
-    SELF_ALARM_PREFIX        = var.self_alarm_prefix
-    SELF_EKS_CLUSTER_NAME    = var.self_eks_cluster_name    # EksConfig で必須
-    SELF_EKS_NAMESPACES      = jsonencode(var.self_eks_namespaces)
-    SELF_REPLICATION_BUCKETS = jsonencode(var.self_replication_buckets) # 案 A のみ
+# 東京側の Terraform
 
-    PEER_REGION              = "ap-northeast-1"
-    PEER_REST_API_ID         = var.peer_rest_api_id
-    PEER_STAGE               = var.peer_stage
-    PEER_SCHEDULE_GROUP      = var.peer_schedule_group
-    PEER_REPLICATION_BUCKETS = jsonencode(var.peer_replication_buckets) # 案 A のみ
+module "dr_apigw_block" {          # 大阪を閉塞する
+  image_config_command = ["dr_switch.apigateway.handlers.block"]
+  environment = {
+    REGION      = "ap-northeast-3"
+    REST_API_ID = var.osaka_rest_api_id
+    STAGE       = var.osaka_stage
+  }
+}
+
+module "dr_apigw_enable" {         # 東京を開放する
+  image_config_command = ["dr_switch.apigateway.handlers.enable"]
+  environment = {
+    REGION         = "ap-northeast-1"
+    REST_API_ID    = aws_api_gateway_rest_api.this.id
+    STAGE          = aws_api_gateway_stage.this.stage_name
+    THROTTLE_RATE  = 10000
+    THROTTLE_BURST = 5000
+  }
+}
+
+module "dr_nlb_check" {            # 東京を確認する
+  image_config_command = ["dr_switch.nlb.handlers.check"]
+  environment = {
+    REGION            = "ap-northeast-1"
+    TARGET_GROUP_ARNS = jsonencode(var.target_group_arns)
   }
 }
 ```
+
+`REGION` は全関数で必須。他は使う関数にだけ渡す。設定クラスごとの必須項目は
+`REST_API_ID` / `STAGE`（ApiGatewayConfig）、`SCHEDULE_GROUP`（SchedulerConfig）、
+`EKS_CLUSTERS`（EksConfig の各要素は `name` と `namespaces` が必須）。
 
 ## Step Functions への組み込み
 
@@ -267,8 +322,8 @@ environment {
   "Type": "Task",
   "Resource": "arn:aws:states:::lambda:invoke",
   "Parameters": {
-    "FunctionName": "dr-apigw",
-    "Payload": {"role": "peer", "blocked": true, "dry_run.$": "$.dry_run"}
+    "FunctionName": "dr-apigateway-block",
+    "Payload": {"dry_run.$": "$.dry_run"}
   },
   "Retry": [{
     "ErrorEquals": ["RetryableError", "Lambda.ServiceException",
@@ -341,8 +396,11 @@ Activate(self): scheduler -> apigw       # 失敗は未捕捉 = 停止
     閉塞: rateLimit=0 / burstLimit=0  -> 全リクエストが 429
     開放: 環境変数（または引数）の値に戻す
 
-復元値は `SELF_THROTTLE_RATE` / `SELF_THROTTLE_BURST`（既定 10000 / 5000）。
+復元値は `THROTTLE_RATE` / `THROTTLE_BURST`（既定 10000 / 5000）。既定値は
+現在ステージに設定されている値と同じなので、開放は元の状態への復元になる。
 Step Functions から `{"throttle": {"rate": ..., "burst": ...}}` で上書きできる。
+
+なお `op:remove` は非サポートのため、`replace` で値を書き換えることしかできない。
 
 ### リソースポリシー Deny 方式を採らない理由
 
@@ -356,26 +414,11 @@ Step Functions から `{"throttle": {"rate": ..., "burst": ...}}` で上書き�
 スロットリングは公式に「ベストエフォートで適用され、保証された上限ではなく
 目標値」とされている。理論上わずかな漏れの可能性は残るが、3 の理由から許容する。
 
-### 前提と副作用
-
-現在ステージには明示的なスロットリング設定が無く、`get-stage` に出ている
-10000 / 5000 は**アカウントのデフォルト値**（10,000 RPS / バースト 5,000）が
-表示されているだけ。
-
-- スロットリング設定は `op:remove` が非サポートのため、一度書き込むと
-  「未設定」には戻せない。ただし復元先がデフォルトと同値なので実害はない
-- **明示設定後は、アカウントのクォータを引き上げてもこのステージは環境変数の
-  値のままになる。** 引き上げ時はここも上げること
-- この副作用は「明示設定が存在すること」から生じるもので、Terraform で
-  管理するかどうかとは無関係。Lambda が復元時に書き込む以上、どちらにしても
-  発生する
-
 ### Terraform で管理しない理由
 
 `aws_api_gateway_method_settings` で管理することもできるが、Lambda が値を
-書き換えるためドリフト対策（`ignore_changes`）が必要になる。上記の副作用は
-Terraform 管理の有無で変わらないため、管理コストが増えるだけで得るものがない。
-復元値は Lambda の環境変数だけで持つ。
+書き換えるためドリフト対策（`ignore_changes`）が必要になる。管理コストが
+増えるだけで得るものがないため、復元値は Lambda の環境変数だけで持つ。
 
 ## S3 レプリケーション: 案 A / 案 B
 
@@ -473,7 +516,7 @@ Deployment / DaemonSet / CronJob の 3 種。
 クラスタと並列には置けない。
 
 ```hcl
-SELF_EKS_CLUSTERS = jsonencode([
+EKS_CLUSTERS = jsonencode([
   { name = "cluster-a", namespaces = ["ns-1", "ns-2"] },
   { name = "cluster-b", namespaces = ["ns-1", "ns-2"] },
 ])
@@ -532,7 +575,7 @@ CronJob が作る Job Pod は起動直後に Pending になるのが正常なた
 ため。むしろ動かし続けることで、閉塞直前に書き込まれた未処理ファイルを
 S3 へ吐き出して回収できる。
 
-## check_workload の接続方式
+## dr.eks の接続方式
 
 既存の Pod 再起動 Lambda と同じ方式（`aws eks update-kubeconfig`）を使う。
 
@@ -549,13 +592,13 @@ S3 へ吐き出して回収できる。
 
 | 呼び出し | 設定 | 場所 |
 |---|---|---|
-| AWS API（boto3） | connect 3 秒 / read 5 秒、botocore リトライ 1 回（合計 2 試行） | `common.BOTO_CONFIG` |
-| Kubernetes API | connect 3 秒 / read 10 秒 | `check_workload.K8S_TIMEOUT` |
-| `aws eks update-kubeconfig` | 15 秒 | `check_workload.UPDATE_KUBECONFIG_TIMEOUT_SEC` |
-| ヘルスチェックの HTTPS | 5 秒 | `check_apigw.HEALTH_TIMEOUT_SEC` |
+| AWS API（boto3） | connect 3 秒 / read 5 秒、botocore リトライ 1 回（合計 2 試行） | `dr_switch.core.aws.BOTO_CONFIG` |
+| Kubernetes API | connect 3 秒 / read 10 秒 | `dr_switch.eks.handlers.K8S_TIMEOUT` |
+| `aws eks update-kubeconfig` | 15 秒 | `dr_switch.eks.handlers.UPDATE_KUBECONFIG_TIMEOUT_SEC` |
+| ヘルスチェックの HTTPS | 5 秒 | `dr_switch.apigateway.handlers.HEALTH_TIMEOUT_SEC` |
 
 boto3 の既定は connect / read とも 60 秒で、DR 切替には長すぎる。
-`BOTO_CONFIG` を `common.client()` に必ず適用しているため、素の
+`BOTO_CONFIG` を `dr_switch.core.aws.client()` に必ず適用しているため、素の
 `boto3.client()` を直接呼ばないこと。
 
 botocore 内部のリトライは最小限（`max_attempts=1`）にし、再試行は
@@ -569,7 +612,7 @@ Lambda 自体のタイムアウトは 60 秒。いずれの関数も待機ルー
 
 ## dry_run
 
-変更系 3 本は `{"dry_run": true}` で読み取りと「実行予定の操作」の返却のみ
+変更系 6 本は `{"dry_run": true}` で読み取りと「実行予定の操作」の返却のみ
 行う。EventBridge Scheduler で週次実行すれば、IAM 権限不足や設定漏れを平時に
 検出できる（訓練時にしか動かないコードの潜伏対策）。特に `dr-scheduler` の
 `iam:PassRole` は見落としやすいので、ここで早期に検証する。
@@ -612,7 +655,7 @@ Lambda 自体のタイムアウトは 60 秒。いずれの関数も待機ルー
 
 | 項目 | 内容 |
 |---|---|
-| F-10 | Dockerfile の分割。AWS CLI が必要なのは `check_workload` のみだが、10 本すべてのイメージに入っている |
+| F-10 | Dockerfile の分割。AWS CLI が必要なのは `dr_switch.eks` のみだが、10 本すべてのイメージに入っている |
 | F-11 | boto3 のバージョン固定。現在はランタイム同梱を使っている |
 | F-19 | ユニットテスト未作成 |
 | — | Step Functions の ASL 本体（フェーズ構成、Parallel、Retry / Catch の配線、全体タイムアウト、二重実行防止） |

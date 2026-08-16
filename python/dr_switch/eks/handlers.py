@@ -1,4 +1,4 @@
-"""dr-check-workload: EKS のワークロードとノードを確認する.
+"""EKS のワークロードを確認する.
 
 kubeconfig は AWS CLI の update-kubeconfig で生成する。CA 証明書と
 トークン取得は CLI が担うため Python 側の実装は不要。
@@ -7,22 +7,26 @@ kubeconfig は AWS CLI の update-kubeconfig で生成する。CA 証明書と
     eks:DescribeCluster / sts:GetCallerIdentity
     ワークロードの参照権限は IAM ではなく Kubernetes RBAC 側
 
-入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
+タイムアウト:
+    update-kubeconfig は 15 秒、Kubernetes API 呼び出しは (connect 3, read 10) 秒。
+
+ハンドラ:
+    check   入力 {}
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from config import ClusterConfig, EksConfig
-from handlers import check_handler
-from logging_json import get_logger
+from dr_switch.core import check_handler
+from dr_switch.eks.config import ClusterConfig, EksConfig
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 KUBECONFIG_DIR = "/tmp"  # noqa: S108 - Lambda で書けるのは /tmp のみ
 AWS_CLI = os.environ.get("AWS_CLI_PATH", "aws")
@@ -123,7 +127,7 @@ def _pending_pods(apis: ClusterApis, namespaces: list[str]) -> list[str]:
 
 
 @check_handler("workload", EksConfig)
-def handler(cfg: EksConfig) -> dict:
+def check(cfg: EksConfig) -> dict:
     problems: dict[str, dict] = {}
 
     for cluster in cfg.clusters:

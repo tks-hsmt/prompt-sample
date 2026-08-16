@@ -1,24 +1,21 @@
-"""dr-scheduler: EventBridge Scheduler スケジュールの停止 / 開始.
+"""EventBridge Scheduler スケジュールの停止 / 開始.
 
-Rules ではなく Scheduler を使うため、events ではなく scheduler
-クライアントを叩く。
+イベント駆動は Rules ではなく Scheduler を使うため、events ではなく
+scheduler クライアントを叩く。
 
-必要な IAM:
+必要な IAM（自関数が対象とするリージョンのグループのみ）:
     scheduler:ListSchedules / GetSchedule / UpdateSchedule
     iam:PassRole  … UpdateSchedule が Target.RoleArn を要求するため必須
 
-入力 : {"role": "self"|"peer", "enabled": bool, "dry_run": bool}
-出力 : {"action": "scheduler", "changed": [...], "skipped": [...]}
+ハンドラ:
+    block   スケジュールを停止。入力 {"dry_run": bool}
+    enable  スケジュールを開始。入力 {"dry_run": bool}
 """
 
 from __future__ import annotations
 
-from aws import client
-from config import SchedulerConfig
-from handlers import ops_handler, run_per_item
-from logging_json import get_logger
-
-logger = get_logger(__name__)
+from dr_switch.core import client, ops_handler, run_per_item
+from dr_switch.scheduler.config import SchedulerConfig
 
 # get_schedule が返すもののうち、update_schedule に渡せない読み取り専用フィールド
 SCHEDULE_READONLY_KEYS = frozenset({
@@ -41,10 +38,8 @@ def _set_state(scheduler, cfg: SchedulerConfig, name: str, state: str) -> dict:
     return {"state": state}
 
 
-@ops_handler("scheduler", SchedulerConfig)
-def handler(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
-    """グループ内のスケジュールを一括で有効化 / 無効化する。"""
-    enabled = bool(event["enabled"])
+def _set_schedules(cfg: SchedulerConfig, *, enabled: bool, dry_run: bool,
+                   best_effort: bool) -> dict:
     scheduler = client("scheduler", cfg.region)
     want = "ENABLED" if enabled else "DISABLED"
 
@@ -63,7 +58,19 @@ def handler(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dic
             return {"would": f"set state to {want}"}
         return _set_state(scheduler, cfg, name, want)
 
-    changed = run_per_item(targets, apply, role=cfg.role, what="scheduler")
+    changed = run_per_item(targets, apply, best_effort=best_effort,
+                           what="scheduler")
 
-    return {"enabled": enabled, "group": cfg.schedule_group,
-            "changed": changed, "skipped": skipped}
+    return {"group": cfg.schedule_group, "changed": changed, "skipped": skipped}
+
+
+@ops_handler("scheduler-block", SchedulerConfig, best_effort=True)
+def block(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
+    """スケジュールを停止する。"""
+    return _set_schedules(cfg, enabled=False, dry_run=dry_run, best_effort=True)
+
+
+@ops_handler("scheduler-enable", SchedulerConfig, best_effort=False)
+def enable(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
+    """スケジュールを開始する。"""
+    return _set_schedules(cfg, enabled=True, dry_run=dry_run, best_effort=False)

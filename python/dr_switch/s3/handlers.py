@@ -1,0 +1,113 @@
+"""S3 レプリケーションの停止 / 開始 / 確認.
+
+必要な IAM（自関数が対象とするリージョンのバケットのみ）:
+    s3:GetReplicationConfiguration / s3:PutReplicationConfiguration
+    s3:ListBucket … check の head_bucket に必要
+    iam:PassRole  … レプリケーション用ロール
+
+バケットは SSE-S3（AES256）で SSE-C 禁止のため KMS 権限は不要。
+
+PutBucketReplication は宛先バケットの存在を検証する。宛先リージョンが
+利用不能なときにこの検証が通るかは公式に明記がない。
+
+ハンドラ:
+    block   レプリケーションを停止。入力 {"dry_run": bool}
+    enable  逆方向レプリケーションを開始。入力 {"dry_run": bool}
+    check   バケットの到達性と Status を確認。入力 {}
+"""
+
+from __future__ import annotations
+
+from botocore.exceptions import ClientError
+
+from dr_switch.core import check_handler, client, ops_handler, run_per_item
+from dr_switch.s3.config import S3Config
+
+NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
+
+
+def _set_replication(cfg: S3Config, bucket: str, *,
+                     enabled: bool, dry_run: bool) -> dict:
+    """レプリケーションルールの Status を一括で切り替える.
+
+    put_bucket_replication は設定を丸ごと置き換えるため、
+    get -> 修正 -> put の順で行う。
+    """
+    s3 = client("s3", cfg.region)
+    want = "Enabled" if enabled else "Disabled"
+
+    # aws s3api get-bucket-replication / put-bucket-replication --bucket <b>
+    configuration = s3.get_bucket_replication(
+        Bucket=bucket)["ReplicationConfiguration"]
+    current = {rule["ID"]: rule["Status"] for rule in configuration["Rules"]}
+
+    if all(status == want for status in current.values()):
+        return {"changed": False, "status": want, "rules": current}
+
+    if dry_run:
+        return {"changed": False, "status": want, "rules": current,
+                "would": f"set all rules to {want}"}
+
+    for rule in configuration["Rules"]:
+        rule["Status"] = want
+    s3.put_bucket_replication(
+        Bucket=bucket, ReplicationConfiguration=configuration)
+
+    return {"changed": True, "status": want,
+            "rules": {rule["ID"]: want for rule in configuration["Rules"]}}
+
+
+def _apply(cfg: S3Config, *, enabled: bool, dry_run: bool,
+           best_effort: bool) -> dict:
+    buckets = run_per_item(
+        cfg.replication_buckets,
+        lambda bucket: _set_replication(
+            cfg, bucket, enabled=enabled, dry_run=dry_run),
+        best_effort=best_effort, what="s3-replication",
+    )
+    return {"buckets": buckets}
+
+
+@ops_handler("s3-replication-block", S3Config, best_effort=True)
+def block(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
+    """レプリケーションを停止する。"""
+    return _apply(cfg, enabled=False, dry_run=dry_run, best_effort=True)
+
+
+@ops_handler("s3-replication-enable", S3Config, best_effort=False)
+def enable(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
+    """逆方向レプリケーションを開始する.
+
+    トラフィックを受け始める前に実行すること。ライブレプリケーションの
+    対象は Enabled 後に書かれたオブジェクトだけのため。
+    """
+    return _apply(cfg, enabled=True, dry_run=dry_run, best_effort=False)
+
+
+@check_handler("s3", S3Config)
+def check(cfg: S3Config) -> dict:
+    """バケットの到達性とレプリケーション Status を確認する。"""
+    s3 = client("s3", cfg.region)
+    problems: dict[str, dict] = {}
+
+    for bucket in cfg.replication_buckets:
+        # aws s3api head-bucket --bucket <b>（アクセス不可なら例外を素通しさせる）
+        s3.head_bucket(Bucket=bucket)
+
+        # aws s3api get-bucket-replication --bucket <b>
+        #   の ReplicationConfiguration.Rules[].Status
+        try:
+            rules = s3.get_bucket_replication(
+                Bucket=bucket)["ReplicationConfiguration"]["Rules"]
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != NOT_CONFIGURED:
+                raise
+            problems[bucket] = {"reason": "replication configuration does not exist"}
+            continue
+
+        disabled = {rule["ID"]: rule["Status"] for rule in rules
+                    if rule["Status"] != "Enabled"}
+        if disabled:
+            problems[bucket] = {"rules_not_enabled": disabled}
+
+    return problems

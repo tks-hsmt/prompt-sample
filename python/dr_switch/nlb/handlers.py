@@ -1,23 +1,23 @@
-"""dr-check-nlb: NLB の登録済みターゲットが健全か確認する.
+"""NLB の登録済みターゲットが健全か確認する.
 
 判定は unhealthy == 0 かつ initial == 0 かつ healthy >= 1。
-必要数を満たしているかの判定は dr-check-workload に一本化している。
+登録済みのターゲットが健全かだけを見る（必要数の判定は行わない）。
 
 必要な IAM:
     elasticloadbalancing:DescribeTargetHealth
 
-入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
+ハンドラ:
+    check   入力 {}
 """
 
 from __future__ import annotations
 
-from aws import client
-from config import NlbConfig
-from handlers import check_handler
+from dr_switch.core import check_handler, client
+from dr_switch.nlb.config import NlbConfig
 
 
 @check_handler("nlb", NlbConfig)
-def handler(cfg: NlbConfig) -> dict:
+def check(cfg: NlbConfig) -> dict:
     elb = client("elbv2", cfg.region)
     problems: dict[str, dict] = {}
 

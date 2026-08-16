@@ -1,20 +1,23 @@
-"""dr-check-alarms: ALARM 状態のアラームが無いか確認する.
+"""ALARM 状態のアラームが無いか確認する.
+
+リソース個別チェックで拾えない異常を包括的にカバーする。
+ALARM_PREFIX を設定して自チームのアラームだけに絞ること。
 
 必要な IAM:
     cloudwatch:DescribeAlarms
 
-入力 : {}   出力 : 正常時は無し / 未収束なら RetryableError
+ハンドラ:
+    check   入力 {}
 """
 
 from __future__ import annotations
 
-from aws import client
-from config import AlarmConfig
-from handlers import check_handler
+from dr_switch.cloudwatch.config import AlarmConfig
+from dr_switch.core import check_handler, client
 
 
 @check_handler("alarms", AlarmConfig)
-def handler(cfg: AlarmConfig) -> dict:
+def check(cfg: AlarmConfig) -> dict:
     # aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix <p>
     #   の MetricAlarms[].AlarmName
     cw = client("cloudwatch", cfg.region)
