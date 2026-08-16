@@ -10,8 +10,8 @@ kubeconfig は AWS CLI の update-kubeconfig で生成する。CA 証明書と
 タイムアウト:
     update-kubeconfig は 15 秒、Kubernetes API 呼び出しは (connect 3, read 10) 秒。
 
-ハンドラ:
-    check   入力 {}
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
+    check   入力 {"dry_run": bool}。成功時は何も返さない。未収束は例外で表現する
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import subprocess
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from dr_switch.core import check_handler
+from dr_switch.core import lambda_handler
 from dr_switch.eks.config import ClusterConfig, EksConfig
 
 logger = logging.getLogger(__name__)
@@ -126,8 +126,8 @@ def _pending_pods(apis: ClusterApis, namespaces: list[str]) -> list[str]:
     return pending
 
 
-@check_handler("workload", EksConfig)
-def check(cfg: EksConfig) -> dict:
+@lambda_handler("eks-check", EksConfig)
+def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
     problems: dict[str, dict] = {}
 
     for cluster in cfg.clusters:

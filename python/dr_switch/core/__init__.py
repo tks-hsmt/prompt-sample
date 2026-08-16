@@ -20,7 +20,7 @@ from dr_switch.core.errors import (
     raise_classified,
     run_per_item,
 )
-from dr_switch.core.middleware import check_handler, ops_handler
+from dr_switch.core.middleware import lambda_handler
 
 __all__ = [
     "AWS_ERRORS",
@@ -28,10 +28,9 @@ __all__ = [
     "BaseConfig",
     "ContinuableError",
     "RetryableError",
-    "check_handler",
     "classify",
     "client",
-    "ops_handler",
+    "lambda_handler",
     "optional",
     "optional_json",
     "raise_classified",

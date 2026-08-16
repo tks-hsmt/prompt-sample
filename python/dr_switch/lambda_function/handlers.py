@@ -5,18 +5,18 @@ State / LastUpdateStatus と、イベントソースマッピングが Enabled �
 必要な IAM:
     lambda:GetFunction / lambda:ListEventSourceMappings
 
-ハンドラ:
-    check   入力 {}
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
+    check   入力 {"dry_run": bool}。成功時は何も返さない。未収束は例外で表現する
 """
 
 from __future__ import annotations
 
-from dr_switch.core import check_handler, client
+from dr_switch.core import client, lambda_handler
 from dr_switch.lambda_function.config import LambdaConfig
 
 
-@check_handler("lambda", LambdaConfig)
-def check(cfg: LambdaConfig) -> dict:
+@lambda_handler("lambda-check", LambdaConfig)
+def check(cfg: LambdaConfig, event: dict, *, dry_run: bool, context) -> dict:
     lam = client("lambda", cfg.region)
     problems: dict[str, dict] = {}
 

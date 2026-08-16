@@ -7,7 +7,7 @@
     apigateway:GET / apigateway:PATCH
         arn:aws:apigateway:<リージョン>::/restapis/<id>/stages/<stage>
 
-ハンドラ:
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
     block   閉塞。入力 {"dry_run": bool}
     enable  開放。入力 {"dry_run": bool,
             "throttle": {"rate": float, "burst": int}}  # throttle は任意
@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 from dr_switch.apigateway.config import ApiGatewayConfig
-from dr_switch.core import check_handler, client, ops_handler
+from dr_switch.core import client, lambda_handler
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def _current_throttle(stage: dict) -> tuple[float | None, int | None]:
 
 
 def _set_throttle(cfg: ApiGatewayConfig, *, rate: float, burst: int,
-                  dry_run: bool) -> dict:
+                  dry_run: bool) -> None:
     apigw = client("apigateway", cfg.region)
 
     # aws apigateway get-stage --rest-api-id <id> --stage-name <stage>
@@ -57,13 +57,14 @@ def _set_throttle(cfg: ApiGatewayConfig, *, rate: float, burst: int,
     current_rate, current_burst = _current_throttle(stage)
 
     if (current_rate, current_burst) == (rate, burst):
-        return {"changed": False, "rate": rate, "burst": burst,
-                "reason": "already in desired state"}
+        logger.info("apigateway %s: already rate=%s burst=%s",
+                    cfg.region, rate, burst)
+        return
 
     if dry_run:
-        return {"changed": False, "rate": rate, "burst": burst,
-                "current_rate": current_rate, "current_burst": current_burst,
-                "would": f"set rate={rate} burst={burst}"}
+        logger.info("apigateway %s: would set rate=%s->%s burst=%s->%s",
+                    cfg.region, current_rate, rate, current_burst, burst)
+        return
 
     # aws apigateway update-stage --rest-api-id <id> --stage-name <stage>
     #   --patch-operations op=replace,path=/*/*/throttling/rateLimit,value=<v>
@@ -77,31 +78,30 @@ def _set_throttle(cfg: ApiGatewayConfig, *, rate: float, burst: int,
     )
     logger.info("apigateway %s: rate=%s->%s burst=%s->%s",
                 cfg.region, current_rate, rate, current_burst, burst)
-    return {"changed": True, "rate": rate, "burst": burst,
-            "previous_rate": current_rate, "previous_burst": current_burst}
 
 
-@ops_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
+@lambda_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
 def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
     """スロットリングを 0 にして閉塞する。"""
-    return _set_throttle(cfg, rate=BLOCKED_RATE, burst=BLOCKED_BURST,
-                         dry_run=dry_run)
+    _set_throttle(cfg, rate=BLOCKED_RATE, burst=BLOCKED_BURST, dry_run=dry_run)
+    return {}
 
 
-@ops_handler("apigateway-enable", ApiGatewayConfig, best_effort=False)
+@lambda_handler("apigateway-enable", ApiGatewayConfig)
 def enable(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
     """スロットリングを通常値へ戻して開放する。"""
     override = event.get("throttle") or {}
-    return _set_throttle(
+    _set_throttle(
         cfg,
         rate=float(override.get("rate", cfg.throttle_rate)),
         burst=int(override.get("burst", cfg.throttle_burst)),
         dry_run=dry_run,
     )
+    return {}
 
 
-@check_handler("apigateway", ApiGatewayConfig)
-def check(cfg: ApiGatewayConfig) -> dict:
+@lambda_handler("apigateway-check", ApiGatewayConfig)
+def check(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
     """開放が効いているか確認する.
 
     設定確認だけでは「設定は正しいが通らない」を検出できないため、

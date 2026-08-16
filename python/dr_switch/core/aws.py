@@ -7,12 +7,22 @@ from functools import cache
 import boto3
 from botocore.config import Config
 
-# 既定は connect / read とも 60 秒で長すぎるため明示する。
-# max_attempts は「リトライ回数」であって総試行回数ではない（1 なら合計 2 回）。
+# タイムアウトは既定の 60 秒では長すぎるため明示する。
+# 最悪待ち時間は (connect + read) * 試行回数 = (3 + 5) * 3 = 24 秒 / API 呼び出し。
+#
+# リトライは standard モードの既定（合計 3 回）をそのまま使う。boto3 の既定は
+# まだ legacy で、AWS は legacy を非推奨としているためモードのみ明示する。
+# 既定を変えない理由は、バックオフが短く（一過性エラーで合計約 75ms、
+# スロットリングで約 1.5 秒）RTO への影響が無視できる一方、回数を削ると
+# 本来 SDK が吸収できる失敗が呼び出し元まで漏れるため。
+#
+# 注意: max_attempts は設定場所で意味が変わる。
+#   Config(retries={"max_attempts": N})  -> リトライ回数（合計 N+1 回）
+#   環境変数 AWS_MAX_ATTEMPTS            -> 合計試行回数（1 でリトライ無効）
 BOTO_CONFIG = Config(
     connect_timeout=3,
     read_timeout=5,
-    retries={"mode": "standard", "max_attempts": 1},
+    retries={"mode": "standard"},
 )
 
 

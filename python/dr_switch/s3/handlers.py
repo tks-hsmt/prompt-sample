@@ -10,7 +10,7 @@
 PutBucketReplication は宛先バケットの存在を検証する。宛先リージョンが
 利用不能なときにこの検証が通るかは公式に明記がない。
 
-ハンドラ:
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
     block   レプリケーションを停止。入力 {"dry_run": bool}
     enable  逆方向レプリケーションを開始。入力 {"dry_run": bool}
     check   バケットの到達性と Status を確認。入力 {}
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from botocore.exceptions import ClientError
 
-from dr_switch.core import check_handler, client, ops_handler, run_per_item
+from dr_switch.core import client, lambda_handler, run_per_item
 from dr_switch.s3.config import S3Config
 
 NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
@@ -28,6 +28,7 @@ NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
 
 def _set_replication(cfg: S3Config, bucket: str, *,
                      enabled: bool, dry_run: bool) -> dict:
+    # run_per_item が結果を集約するため dict を返す（ハンドラの戻り値ではない）
     """レプリケーションルールの Status を一括で切り替える.
 
     put_bucket_replication は設定を丸ごと置き換えるため、
@@ -58,34 +59,35 @@ def _set_replication(cfg: S3Config, bucket: str, *,
 
 
 def _apply(cfg: S3Config, *, enabled: bool, dry_run: bool,
-           best_effort: bool) -> dict:
-    buckets = run_per_item(
+           best_effort: bool) -> None:
+    run_per_item(
         cfg.replication_buckets,
         lambda bucket: _set_replication(
             cfg, bucket, enabled=enabled, dry_run=dry_run),
         best_effort=best_effort, what="s3-replication",
     )
-    return {"buckets": buckets}
 
 
-@ops_handler("s3-replication-block", S3Config, best_effort=True)
+@lambda_handler("s3-replication-block", S3Config, best_effort=True)
 def block(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     """レプリケーションを停止する。"""
-    return _apply(cfg, enabled=False, dry_run=dry_run, best_effort=True)
+    _apply(cfg, enabled=False, dry_run=dry_run, best_effort=True)
+    return {}
 
 
-@ops_handler("s3-replication-enable", S3Config, best_effort=False)
+@lambda_handler("s3-replication-enable", S3Config)
 def enable(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     """逆方向レプリケーションを開始する.
 
     トラフィックを受け始める前に実行すること。ライブレプリケーションの
     対象は Enabled 後に書かれたオブジェクトだけのため。
     """
-    return _apply(cfg, enabled=True, dry_run=dry_run, best_effort=False)
+    _apply(cfg, enabled=True, dry_run=dry_run, best_effort=False)
+    return {}
 
 
-@check_handler("s3", S3Config)
-def check(cfg: S3Config) -> dict:
+@lambda_handler("s3-check", S3Config)
+def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     """バケットの到達性とレプリケーション Status を確認する。"""
     s3 = client("s3", cfg.region)
     problems: dict[str, dict] = {}

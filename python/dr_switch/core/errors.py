@@ -29,30 +29,78 @@ AWS_ERRORS = (ClientError, BotoCoreError)
 # RETRYABLE_CODES では拾えない。この 2 つが botocore の接続系例外の基底。
 TRANSIENT_ERRORS = (ConnectionError, HTTPClientError)
 
+# 再試行で解消しうるエラーコード。
+#
+# リトライは 2 層になっている。
+#   SDK（botocore standard モード）… 個々の API 呼び出しを合計 3 回まで再送。
+#                                     バックオフは一過性で約 75ms、
+#                                     スロットリングで約 1.5 秒
+#   呼び出し元（この分類）          … SDK が数回の短いバックオフで解消できな
+#                                     かったものを、より長い間隔で再試行させる
+# ここで分類するのは「SDK が諦めた後」の失敗であり、SDK のリトライとは
+# 対象（1 呼び出し / 処理全体）も時間スケールも異なる。
+#
+# 分類の根拠は botocore の standard リトライモードの定義
+# （botocore/retries/standard.py の ThrottledRetryableChecker.
+# _THROTTLED_ERROR_CODES と TransientRetryableChecker._TRANSIENT_ERROR_CODES）。
+# AWS SDK 自身が「再試行すべき」と判定しているコードそのもの。
+#
+# 「発生元」は各サービスの API モデル（botocore/data/<service>/*/service-2.json）
+# が例外シェイプとして宣言しているものを確認した結果。query プロトコルの
+# サービス（elbv2 / cloudwatch / sts）は汎用の Throttling を返すためモデルに
+# 個別宣言がない。
+#
+# botocore のリストのうち BandwidthLimitExceeded は、ここで呼ぶどのサービスの
+# モデルにも宣言が無いため含めていない。
 RETRYABLE_CODES = frozenset({
-    # スロットリング系。サービスごとにコードが異なる
+    # --- スロットリング系（botocore: throttled） ---
+    # 発生元: dynamodb / eks / scheduler
     "ThrottlingException",
+    # 発生元: query プロトコルのサービス全般（elbv2 / cloudwatch / sts）
     "Throttling",
     "ThrottledException",
-    "TooManyRequestsException",
-    "RequestLimitExceeded",
     "RequestThrottled",
     "RequestThrottledException",
+    # 発生元: apigateway / lambda（HTTP 429）
+    "TooManyRequestsException",
+    # 発生元: dynamodb
+    "RequestLimitExceeded",
+    # 発生元: s3。リクエストレート急増時に 503 Slow Down を返す。AWS は
+    # 「リクエストレートを維持し、指数バックオフで再試行する」ことを案内している
     "SlowDown",
+    # 発生元: dynamodb（プロビジョンドキャパシティ超過）
     "ProvisionedThroughputExceededException",
-    # 一過性のサービス側エラー
+    # 発生元: apigateway / dynamodb
+    "LimitExceededException",
+    # 発生元: dynamodb（同一項目への並行トランザクション）
+    "TransactionInProgressException",
+    # 発生元: lambda（VPC 内 ENI 作成のスロットリング）
+    "EC2ThrottledException",
+
+    # --- 一過性のサービス側エラー（botocore: transient） ---
+    "RequestTimeout",
+    "RequestTimeoutException",
+    # botocore では throttled と transient の両方に含まれる
+    "PriorRequestNotComplete",
+
+    # --- botocore のリストには無いが、明示的に追加したもの ---
+    # botocore は HTTP ステータス 500 / 502 / 503 / 504 で再試行を判定するため
+    # コード名を持たない。こちらはコードを見て分類するので個別に列挙する。
+    # 発生元: apigateway / eks（ServiceUnavailableException）、dynamodb
+    # （InternalServerError）、lambda（ServiceException）、eks（ServerException）
     "ServiceUnavailable",
     "ServiceUnavailableException",
     "InternalFailure",
     "InternalServerError",
     "InternalServerErrorException",
-    "LimitExceededException",
+    "ServiceException",
+    "ServerException",
+    # 発生元: apigateway / scheduler / cloudwatch。同一リソースへの並行更新で
+    # 発生する。切替ワークフローは同じリソースを 1 回しか操作しないため通常は
+    # 起きないが、再実行が重なった場合は時間をおけば解消する。
+    # botocore は再試行対象としていないため、こちらの判断で追加している。
     "ConflictException",
-    "RequestTimeout",
-    "RequestTimeoutException",
-    "PriorRequestNotComplete",
 })
-
 
 class RetryableError(Exception):
     """時間をおいて再試行すれば解消しうる失敗、または未収束の状態。"""

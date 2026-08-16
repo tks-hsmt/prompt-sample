@@ -27,8 +27,8 @@ Step Functions が区別する必要があるのは 2 つだけ。
 開放は失敗したら切替が成立しないため `False`。ハンドラの宣言に書く。
 
 ```python
-@ops_handler("apigw-block",  ApiGatewayConfig, best_effort=True)
-@ops_handler("apigw-enable", ApiGatewayConfig, best_effort=False)
+@lambda_handler("apigateway-block",  ApiGatewayConfig, best_effort=True)
+@lambda_handler("apigateway-enable", ApiGatewayConfig)
 ```
 
 AWS SDK 以外の例外（`KeyError` 等）は分類せず素通しさせる。自分のコードの
@@ -36,7 +36,7 @@ AWS SDK 以外の例外（`KeyError` 等）は分類せず素通しさせる。�
 
 ### 捕捉はデコレータに集約する
 
-AWS 例外の `try/except` は `@ops_handler` の中だけに置き、個々の操作側では
+AWS 例外の `try/except` は `lambda_handler` の中だけに置き、個々のハンドラでは
 書かない。
 
 - 分類の判断材料はエラーコードと role の 2 つで、どちらもデコレータが
@@ -62,7 +62,7 @@ AWS 例外の `try/except` は `@ops_handler` の中だけに置き、個々の�
 
 `dr_switch.scheduler` と `dr_switch.s3` は同じ性質の操作なので、同じヘルパを使う。
 一覧取得（`list_schedules`）の失敗は 1 件の失敗ではないので、ループの外に
-置いて `@ops_handler` に分類させる。
+置いて `lambda_handler` に分類させる。
 
 観測系の check ハンドラは揃えない。AWS エラーが出るのは権限不足やリソース不在＝
 バグで、続けても意味がないため中断が妥当。「未収束」の問題はループが正常に
@@ -70,32 +70,36 @@ AWS 例外の `try/except` は `@ops_handler` の中だけに置き、個々の�
 
 ## 横断処理はデコレータ
 
-`dr_switch/core/middleware.py` の 2 つのデコレータが、設定読み込み・ログ・応答整形・
-例外送出を担う。各ハンドラは自分の確認内容だけを書く。
-
-### 観測系 `@check_handler(name, ConfigCls)`
+`dr_switch/core/middleware.py` の `lambda_handler` が、設定読み込み・ログ・
+AWS 例外の分類を担う。各ハンドラは自分の処理だけを書く。
 
 ```python
-@check_handler("nlb", NlbConfig)
-def check(cfg: NlbConfig) -> dict:
+@lambda_handler("nlb-check", NlbConfig)
+def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
     return problems   # 問題のある項目だけを返す。正常なら {}
-```
 
-- **正常時は何も返さない**（`None`）
-- 問題があれば、その項目だけを JSON にして `RetryableError` で送出
-- 項目ごとの `ok` フラグは持たない。例外に載る = NG が自明なので冗長
-- AWS API のエラーは握りつぶさず素通し。権限不足やリソース不在はバグであり、
-  待っても直らないので止まるのが正しい
 
-### 操作系 `@ops_handler(action, ConfigCls, best_effort=...)`
-
-```python
-@ops_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
+@lambda_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
 def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
-    return {"changed": True, ...}
+    _set_throttle(...)
+    return {}
 ```
 
-`{"action", "role", "region", "dry_run"}` を付けて返す。
+### 契約は 1 つ
+
+    成功                 -> 何も返さない
+    一時的な失敗・未収束 -> RetryableError
+    継続してよい失敗     -> ContinuableError
+    それ以外             -> 元の例外をそのまま送出
+
+**操作系と観測系でデコレータを分けない。** 呼び出し元は例外の有無だけで
+判断するので、契約は同一になる。分けていたときは観測系が AWS 例外を素通しして
+おり、スロットリングでワークフローが止まる不整合があった。
+
+**「何をしたか」は返さない。** 実行前から決まっているうえ、呼び出し元が
+参照しない。障害調査に必要な情報はログに出す。
+
+戻り値は「問題のある項目」だけを表す。処理を実行するだけの関数は常に空を返す。
 
 ## 構成
 
@@ -109,7 +113,7 @@ dr_switch/
     aws.py                 # boto3 クライアント（BOTO_CONFIG）
     config.py              # 環境変数ヘルパと BaseConfig
     errors.py              # 例外の分類と集約（run_per_item を含む）
-    middleware.py          # ops_handler / check_handler
+    middleware.py          # lambda_handler
   apigateway/
     config.py  handlers.py    # block / enable / check
   scheduler/
@@ -172,7 +176,7 @@ Dockerfile
 import が 1 行で済む。
 
 ```python
-from dr_switch.core import check_handler, client
+from dr_switch.core import client, lambda_handler
 ```
 
 **`dr_switch/core/` の内部は必ずフルパスで import する**（`from
@@ -203,12 +207,12 @@ AWS が明文化しているのは「ハンドラをコアロジックから分�
 
 ```python
 @inject_lambda_context
-@check_handler("nlb", NlbConfig)
-def check(cfg: NlbConfig) -> dict:
+@lambda_handler("nlb-check", NlbConfig)
+def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
     ...
 ```
 
-`inject_lambda_context` は `check_handler` の**外側**に置く。内側に置くと
+`inject_lambda_context` は `lambda_handler` の**外側**に置く。内側に置くと
 シグネチャが合わず実行時に TypeError になる。
 
 ## デプロイ（コンテナイメージ）
@@ -592,7 +596,7 @@ S3 へ吐き出して回収できる。
 
 | 呼び出し | 設定 | 場所 |
 |---|---|---|
-| AWS API（boto3） | connect 3 秒 / read 5 秒、botocore リトライ 1 回（合計 2 試行） | `dr_switch.core.aws.BOTO_CONFIG` |
+| AWS API（boto3） | connect 3 秒 / read 5 秒、リトライは standard モードの既定（合計 3 試行） | `dr_switch.core.aws.BOTO_CONFIG` |
 | Kubernetes API | connect 3 秒 / read 10 秒 | `dr_switch.eks.handlers.K8S_TIMEOUT` |
 | `aws eks update-kubeconfig` | 15 秒 | `dr_switch.eks.handlers.UPDATE_KUBECONFIG_TIMEOUT_SEC` |
 | ヘルスチェックの HTTPS | 5 秒 | `dr_switch.apigateway.handlers.HEALTH_TIMEOUT_SEC` |
@@ -601,11 +605,26 @@ boto3 の既定は connect / read とも 60 秒で、DR 切替には長すぎる
 `BOTO_CONFIG` を `dr_switch.core.aws.client()` に必ず適用しているため、素の
 `boto3.client()` を直接呼ばないこと。
 
-botocore 内部のリトライは最小限（`max_attempts=1`）にし、再試行は
-Step Functions の `Retry` に任せる。実行履歴に残り、待機時間を宣言で
-制御できるため。なお `max_attempts` は**リトライ回数**であって総試行回数
-ではない（1 なら初回 + リトライ 1 回 = 合計 2 回）。API 呼び出し 1 回の
-最悪待ち時間は `(3 + 5) * 2 = 16 秒`。
+### リトライは 2 層
+
+| 層 | 対象 | 時間スケール |
+|---|---|---|
+| SDK（botocore standard モード） | 個々の API 呼び出し | 一過性で約 75ms、スロットリングで約 1.5 秒 |
+| Step Functions（`RETRYABLE_CODES` 経由） | Lambda 全体 | 5〜30 秒間隔 |
+
+**SDK のリトライ回数は既定（合計 3 回）のまま使う。** AWS は standard モードを
+推奨し既定を 3 回としており、バックオフが短いため RTO への影響は無視できる。
+回数を削ると、本来 SDK が吸収できる失敗が呼び出し元まで漏れる。
+`mode` だけ明示するのは、boto3 の既定がまだ非推奨の `legacy` のため。
+
+`RETRYABLE_CODES` が分類するのは **SDK が諦めた後**の失敗。SDK の短いバックオフで
+解消しなかった以上、より長い間隔での再試行が要る状態である、という判断になる。
+
+API 呼び出し 1 回の最悪待ち時間は `(3 + 5) * 3 = 24 秒`。
+
+**注意**: `max_attempts` は設定場所で意味が変わる。`Config(retries=...)` では
+リトライ回数（合計 N+1 回）、環境変数 `AWS_MAX_ATTEMPTS` では合計試行回数
+（1 でリトライ無効）。
 
 Lambda 自体のタイムアウトは 60 秒。いずれの関数も待機ループを持たないので、
 これ以上長くすると応答しない相手を待つだけになる。

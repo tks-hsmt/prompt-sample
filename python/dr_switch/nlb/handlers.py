@@ -6,18 +6,18 @@
 必要な IAM:
     elasticloadbalancing:DescribeTargetHealth
 
-ハンドラ:
-    check   入力 {}
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
+    check   入力 {"dry_run": bool}。成功時は何も返さない。未収束は例外で表現する
 """
 
 from __future__ import annotations
 
-from dr_switch.core import check_handler, client
+from dr_switch.core import client, lambda_handler
 from dr_switch.nlb.config import NlbConfig
 
 
-@check_handler("nlb", NlbConfig)
-def check(cfg: NlbConfig) -> dict:
+@lambda_handler("nlb-check", NlbConfig)
+def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
     elb = client("elbv2", cfg.region)
     problems: dict[str, dict] = {}
 

@@ -6,18 +6,18 @@ ALARM_PREFIX を設定して自チームのアラームだけに絞ること。
 必要な IAM:
     cloudwatch:DescribeAlarms
 
-ハンドラ:
-    check   入力 {}
+ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
+    check   入力 {"dry_run": bool}。成功時は何も返さない。未収束は例外で表現する
 """
 
 from __future__ import annotations
 
 from dr_switch.cloudwatch.config import AlarmConfig
-from dr_switch.core import check_handler, client
+from dr_switch.core import client, lambda_handler
 
 
-@check_handler("alarms", AlarmConfig)
-def check(cfg: AlarmConfig) -> dict:
+@lambda_handler("cloudwatch-check", AlarmConfig)
+def check(cfg: AlarmConfig, event: dict, *, dry_run: bool, context) -> dict:
     # aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix <p>
     #   の MetricAlarms[].AlarmName
     cw = client("cloudwatch", cfg.region)

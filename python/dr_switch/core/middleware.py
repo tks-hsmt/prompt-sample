@@ -1,6 +1,6 @@
 """ハンドラを包むデコレータ.
 
-設定の読み込み、ログ、応答の整形、例外の分類を引き受ける。
+設定の読み込みと AWS 例外の分類を引き受ける。
 対象リージョンは環境変数で決まるため、ここでは判断しない。
 
 ログの初期化と呼び出しコンテキストの注入は共通モジュールの
@@ -24,62 +24,53 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def ops_handler(action: str, config_cls: type[BaseConfig], *,
-                best_effort: bool) -> Callable:
-    """操作系ハンドラ用。設定読み込み・ログ・応答整形・AWS 例外の分類を担う.
+def lambda_handler(action: str, config_cls: type[BaseConfig], *,
+                   best_effort: bool = False) -> Callable:
+    """ハンドラの契約を実装する.
 
-    best_effort は操作の性質。失敗しても処理を続けてよい操作なら True。
+        成功                    -> 何も返さない
+        一時的な失敗・未収束    -> RetryableError
+        継続してよい失敗        -> ContinuableError
+        それ以外                -> 元の例外をそのまま送出
+
+    呼び出し元は例外の有無だけで判断する。何をしたかは返さない
+    （実行前から決まっているうえ、参照されないため）。
 
     デコレートされる関数のシグネチャ:
         fn(cfg: <ConfigCls>, event: dict, *, dry_run: bool, context) -> dict
 
-    AWS 例外の捕捉はここだけに置く。個々の操作側では書かない。
-    AWS_ERRORS 以外（自分のコードのバグ）と、run_per_item が送出する
-    RetryableError / ContinuableError は捕捉せず素通しする。
+    戻り値は「問題のある項目」だけを表す。空なら成功。非空なら
+    RetryableError に載せて送出する。処理を実行するだけの関数は
+    常に空を返す。
+
+    best_effort は操作の性質。失敗しても処理を続けてよい操作なら True。
+
+    AWS 例外の捕捉はここだけに置く。AWS_ERRORS 以外（自分のコードのバグ）と、
+    run_per_item が送出する RetryableError / ContinuableError は
+    捕捉せず素通しする。
     """
 
-    def decorator(fn: Callable[..., dict]) -> Callable[[dict, Any], dict]:
+    def decorator(fn: Callable[..., dict]) -> Callable[[dict, Any], None]:
         @functools.wraps(fn)
-        def wrapper(event: dict, context) -> dict:
+        def wrapper(event: dict, context) -> None:
             dry_run = bool(event.get("dry_run", False))
             cfg = config_cls.from_env()
             logger.info("%s start: region=%s dry_run=%s",
                         action, cfg.region, dry_run)
+
             try:
-                result = fn(cfg, event, dry_run=dry_run, context=context)
+                problems = fn(cfg, event, dry_run=dry_run, context=context)
             except AWS_ERRORS as exc:
                 raise_classified(exc, best_effort=best_effort,
                                  what=f"{action}({cfg.region})")
-            logger.info("%s done: %s", action, json.dumps(result, default=str))
-            return {"action": action, "region": cfg.region,
-                    "dry_run": dry_run, **result}
 
-        return wrapper
-
-    return decorator
-
-
-def check_handler(name: str, config_cls: type[BaseConfig]) -> Callable:
-    """観測系ハンドラ用。未収束なら RetryableError を送出.
-
-    デコレートされる関数のシグネチャ:
-        fn(cfg: <ConfigCls>) -> dict   # 問題のある項目だけを返す。正常なら {}
-
-    AWS API のエラーは捕捉せず素通しする。
-    """
-
-    def decorator(fn: Callable[[Any], dict]) -> Callable[[dict, Any], None]:
-        @functools.wraps(fn)
-        def wrapper(event: dict, context) -> None:
-            cfg = config_cls.from_env()
-            logger.info("check %s start: region=%s", name, cfg.region)
-            problems = fn(cfg)
             if problems:
-                message = json.dumps({name: problems}, ensure_ascii=False,
+                message = json.dumps({action: problems}, ensure_ascii=False,
                                      default=str)
-                logger.warning("check %s not ready: %s", name, message)
+                logger.warning("%s not ready: %s", action, message)
                 raise RetryableError(message)
-            logger.info("check %s ok: region=%s", name, cfg.region)
+
+            logger.info("%s done: region=%s", action, cfg.region)
 
         return wrapper
 
