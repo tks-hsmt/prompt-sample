@@ -18,9 +18,16 @@ PutBucketReplication は宛先バケットの存在を検証する。宛先リ�
 
 from __future__ import annotations
 
+import json
+
 from botocore.exceptions import ClientError
 
-from dr_switch.core import client, lambda_handler, run_per_item
+from dr_switch.core import (
+    NotRecoverableError,
+    client,
+    lambda_handler,
+    run_per_item,
+)
 from dr_switch.s3.config import S3Config
 
 NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
@@ -91,6 +98,7 @@ def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     """バケットの到達性とレプリケーション Status を確認する。"""
     s3 = client("s3", cfg.region)
     problems: dict[str, dict] = {}
+    fatal: dict[str, dict] = {}
 
     for bucket in cfg.replication_buckets:
         # aws s3api head-bucket --bucket <b>（アクセス不可なら例外を素通しさせる）
@@ -104,7 +112,8 @@ def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
         except ClientError as exc:
             if exc.response["Error"]["Code"] != NOT_CONFIGURED:
                 raise
-            problems[bucket] = {"reason": "replication configuration does not exist"}
+            # 設定そのものが無い状態は待っても現れない
+            fatal[bucket] = {"reason": "replication configuration does not exist"}
             continue
 
         disabled = {rule["ID"]: rule["Status"] for rule in rules
@@ -112,4 +121,7 @@ def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
         if disabled:
             problems[bucket] = {"rules_not_enabled": disabled}
 
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"s3": fatal}, ensure_ascii=False, default=str))
     return problems

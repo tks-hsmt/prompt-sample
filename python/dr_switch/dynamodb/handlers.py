@@ -11,17 +11,32 @@
 
 from __future__ import annotations
 
-from dr_switch.core import client, lambda_handler
+import json
+
+from dr_switch.core import NotRecoverableError, client, lambda_handler
 from dr_switch.dynamodb.config import DynamoDbConfig
+
+# 待てば ACTIVE になる状態
+TRANSIENT_STATES = frozenset({"CREATING", "UPDATING"})
 
 
 @lambda_handler("dynamodb-check", DynamoDbConfig)
 def check(cfg: DynamoDbConfig, event: dict, *, dry_run: bool, context) -> dict:
     # aws dynamodb describe-table --table-name <n> の Table.TableStatus
     ddb = client("dynamodb", cfg.region)
-    return {
-        name: {"status": status}
-        for name in cfg.table_names
-        if (status := ddb.describe_table(
-            TableName=name)["Table"]["TableStatus"]) != "ACTIVE"
-    }
+    problems: dict[str, dict] = {}
+    fatal: dict[str, dict] = {}
+
+    for name in cfg.table_names:
+        status = ddb.describe_table(TableName=name)["Table"]["TableStatus"]
+        if status == "ACTIVE":
+            continue
+        # DELETING / ARCHIVED / INACCESSIBLE_ENCRYPTION_CREDENTIALS は
+        # 待っても ACTIVE にならない
+        target = problems if status in TRANSIENT_STATES else fatal
+        target[name] = {"status": status}
+
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"dynamodb": fatal}, ensure_ascii=False, default=str))
+    return problems

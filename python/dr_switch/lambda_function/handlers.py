@@ -1,50 +1,61 @@
-"""Lambda が実行可能な状態か確認する.
+"""Lambda が呼び出せる状態か確認する.
 
-State / LastUpdateStatus と、イベントソースマッピングが Enabled かを見る。
+VPC 設定のある関数は、長くアイドル状態が続くと Lambda が外部リソースを回収し
+State が Inactive になる。その状態で呼び出すと最初の 1 回は失敗し、リソースが
+再作成されるまで Pending になる。待機側の関数は普段呼ばれないため、切替の
+瞬間にこの状態になっている可能性がある。
 
 必要な IAM:
-    lambda:GetFunction / lambda:ListEventSourceMappings
+    lambda:GetFunctionConfiguration
 
 ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
-    check   入力 {"dry_run": bool}。成功時は何も返さない。未収束は例外で表現する
+    check   入力 {"dry_run": bool}
 """
 
 from __future__ import annotations
 
-from dr_switch.core import client, lambda_handler
+import json
+
+from dr_switch.core import NotRecoverableError, client, lambda_handler
 from dr_switch.lambda_function.config import LambdaConfig
+
+# 待てば収束する状態。リソース作成中・デプロイ中で、時間が経てば Active になる。
+TRANSIENT_STATES = frozenset({"Pending"})
+TRANSIENT_UPDATE_STATUSES = frozenset({"InProgress"})
 
 
 @lambda_handler("lambda-check", LambdaConfig)
 def check(cfg: LambdaConfig, event: dict, *, dry_run: bool, context) -> dict:
     lam = client("lambda", cfg.region)
     problems: dict[str, dict] = {}
+    fatal: dict[str, dict] = {}
 
     for name in cfg.function_names:
-        # aws lambda get-function --function-name <name>
-        #   の Configuration.State / Configuration.LastUpdateStatus
-        conf = lam.get_function(FunctionName=name)["Configuration"]
+        # aws lambda get-function-configuration --function-name <name>
+        #   の State / LastUpdateStatus
+        # ListFunctions では State を取得できないため関数ごとに呼ぶ
+        #（公式に「State 等を得るには GetFunction を使う」と明記がある）。
+        conf = lam.get_function_configuration(FunctionName=name)
+        state = conf.get("State")
+        update = conf.get("LastUpdateStatus")
+
         issue = {}
+        if state != "Active":
+            issue["state"] = state
+            issue["state_reason"] = conf.get("StateReason")
+        if update != "Successful":
+            issue["last_update_status"] = update
+            issue["last_update_status_reason"] = conf.get("LastUpdateStatusReason")
+        if not issue:
+            continue
 
-        if conf.get("State") != "Active":
-            issue["state"] = conf.get("State")
-        if conf.get("LastUpdateStatus") != "Successful":
-            issue["last_update_status"] = conf.get("LastUpdateStatus")
+        # Inactive / Failed は待っても解消しない。Inactive の解消には関数の
+        # 呼び出しが必要で、状態を見るだけでは何も起きない。
+        recoverable = (state in TRANSIENT_STATES
+                       or update in TRANSIENT_UPDATE_STATUSES)
+        (problems if recoverable else fatal)[name] = issue
 
-        # aws lambda list-event-source-mappings --function-name <name>
-        #   の EventSourceMappings[].State
-        # 既定では 100 件で無言に打ち切られるためページネータを使う
-        paginator = lam.get_paginator("list_event_source_mappings")
-        disabled = [
-            m["UUID"]
-            for page in paginator.paginate(FunctionName=name)
-            for m in page["EventSourceMappings"]
-            if m["State"] != "Enabled"
-        ]
-        if disabled:
-            issue["event_source_mappings_not_enabled"] = disabled
-
-        if issue:
-            problems[name] = issue
-
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"lambda": fatal}, ensure_ascii=False, default=str))
     return problems

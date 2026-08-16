@@ -15,6 +15,7 @@ from dr_switch.core.config import (
 from dr_switch.core.errors import (
     AWS_ERRORS,
     ContinuableError,
+    NotRecoverableError,
     RetryableError,
     classify,
     raise_classified,
@@ -27,6 +28,7 @@ __all__ = [
     "BOTO_CONFIG",
     "BaseConfig",
     "ContinuableError",
+    "NotRecoverableError",
     "RetryableError",
     "classify",
     "client",

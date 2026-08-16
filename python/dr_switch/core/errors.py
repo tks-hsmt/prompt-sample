@@ -3,6 +3,8 @@
 AWS の例外を 3 通りに振り分ける。再試行すべきもの（RetryableError）、
 失敗したが処理を続けてよいもの（ContinuableError）、それ以外は分類せず
 元の例外をそのまま送出する。
+
+ハンドラが自分で判定する「待っても解消しない状態」には NotRecoverableError を使う。
 """
 
 from __future__ import annotations
@@ -110,6 +112,19 @@ class ContinuableError(Exception):
     """失敗したが、呼び出し元は処理を継続してよい。"""
 
 
+class NotRecoverableError(Exception):
+    """待っても解消しない状態を検出した。再試行せず止める.
+
+    「まだ収束していない」（RetryableError）との区別が目的。Deployment の
+    レプリカ数が足りないのは待てば揃うが、Lambda の State が Failed なのは
+    待っても変わらない。後者を RetryableError にすると、解消しない状態を
+    リトライ上限まで待ってから失敗することになり RTO を無駄にする。
+
+    ハンドラが自分で判定して送出する。Retry にも Catch にもマッチしないので
+    そのままワークフローが止まる。
+    """
+
+
 def classify(exc: Exception, *, best_effort: bool, what: str) -> Exception:
     """AWS 例外を分類して返す（送出はしない）.
 
@@ -151,6 +166,10 @@ def run_per_item(items: list[str], fn: Callable[[str], dict], *,
     """複数インスタンスを独立に処理する。1 件失敗しても残りを必ず試みる.
 
     途中で中断すると、止められたはずの残りが開いたまま残るため。
+
+    例外は接続系エラー（TRANSIENT_ERRORS）のとき。エンドポイントに到達
+    できない状態は項目に依存しないので、残りを試しても同じ結果になる。
+    項目数ぶんタイムアウトを積み上げるだけなので中断する。
     """
     results: dict[str, dict] = {}
     errors: list[str] = []
@@ -159,6 +178,13 @@ def run_per_item(items: list[str], fn: Callable[[str], dict], *,
     for key in items:
         try:
             results[key] = fn(key)
+        except TRANSIENT_ERRORS as exc:
+            # エンドポイントに到達できない。残りの項目も同じ結果になるため、
+            # 待ち時間を積み上げずに中断する。
+            errors.append(f"{key}: {exc}")
+            results[key] = {"error": str(exc)}
+            raise classify(exc, best_effort=best_effort,
+                           what=f"{what}({key})") from exc
         except AWS_ERRORS as exc:
             classified = classify(exc, best_effort=best_effort,
                                   what=f"{what}({key})")

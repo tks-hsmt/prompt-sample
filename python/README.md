@@ -85,12 +85,27 @@ def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict
     return {}
 ```
 
-### 契約は 1 つ
+### 契約
 
-    成功                 -> 何も返さない
-    一時的な失敗・未収束 -> RetryableError
-    継続してよい失敗     -> ContinuableError
-    それ以外             -> 元の例外をそのまま送出
+    成功                     -> 何も返さない
+    一時的な失敗・未収束     -> RetryableError
+    継続してよい失敗         -> ContinuableError
+    待っても解消しない状態   -> NotRecoverableError
+    それ以外                 -> 元の例外をそのまま送出
+
+`NotRecoverableError` はハンドラが自分で判定して送出する。Retry にも Catch にも
+マッチしないのでワークフローが止まる。「まだ収束していない」と区別するのが目的で、
+これが無いと解消しない状態をリトライ上限（30 秒 × 10 回 = 5 分）まで待ってから
+失敗することになり、RTO を無駄にする。
+
+| ハンドラ | 待てば直る（RetryableError） | 待っても直らない（NotRecoverableError） |
+|---|---|---|
+| lambda | `Pending` / `LastUpdateStatus: InProgress` | `Inactive` / `Failed` / `LastUpdateStatus: Failed` |
+| dynamodb | `CREATING` / `UPDATING` | `DELETING` / `ARCHIVED` など |
+| s3 | ルールが `Disabled` | レプリケーション設定が存在しない |
+| eks | `readyReplicas` 不足 / Pending Pod | DaemonSet の `desiredNumberScheduled == 0` |
+| nlb | `initial` が残っている | — |
+| apigateway | 開放の反映待ち（429） | — |
 
 **操作系と観測系でデコレータを分けない。** 呼び出し元は例外の有無だけで
 判断するので、契約は同一になる。分けていたときは観測系が AWS 例外を素通しして
@@ -239,31 +254,29 @@ resource "aws_lambda_function" "nlb_check" {
 
 ## IAM（リソース単位）
 
-観測系（7〜13）はすべて読み取り専用ロールにできる。変更系（1〜6）とは
-必ずロールを分けること。
+観測系はすべて読み取り専用ロールにできる。変更系とは必ずロールを分けること。
 
 関数を block / enable に分けたことで、**各関数の Resource は片側リージョン
 だけで済む**。
 
 | 関数 | 必要なアクション | Resource |
 |---|---|---|
-| dr-apigw-block | `apigateway:GET` `apigateway:PATCH` | **大阪**（閉塞対象）の `/restapis/<id>/stages/<stage>` |
-| dr-apigw-enable | `apigateway:GET` `apigateway:PATCH` | **東京**（自リージョン）の `/restapis/<id>/stages/<stage>` |
+| dr-apigateway-block | `apigateway:GET` `apigateway:PATCH` | **閉塞対象**の `/restapis/<id>/stages/<stage>` |
+| dr-apigateway-enable | `apigateway:GET` `apigateway:PATCH` | **自リージョン**の `/restapis/<id>/stages/<stage>` |
+| dr-apigateway-check | `apigateway:GET` | 自リージョンの `/restapis/<id>/stages/<stage>` |
+| dr-scheduler-block | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **閉塞対象**の自チームグループのみ／スケジュール実行ロール |
+| dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
+| dr-s3-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象**のバケット／レプリケーションロール |
+| dr-s3-enable | 同上 | **自リージョン**のバケット／レプリケーションロール |
+| dr-s3-check | `s3:ListBucket` `s3:GetReplicationConfiguration` | 自リージョンのバケット |
+| dr-lambda-check | `lambda:GetFunctionConfiguration` | 自リージョンの対象関数 |
+| dr-dynamodb-check | `dynamodb:DescribeTable` | 自リージョンの対象テーブル |
+| dr-nlb-check | `elasticloadbalancing:DescribeTargetHealth` | `*` |
+| dr-cloudwatch-check | `cloudwatch:DescribeAlarms` | `*` |
+| dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 
 東京・大阪は同一 AWS アカウント。両リージョンのリソースを同じ実行ロールで
 操作できることを前提にしている。
-
-| dr-scheduler-block | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **閉塞対象リージョン**の自チームグループのみ／スケジュール実行ロール |
-| dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
-| dr-s3-replication-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象リージョン**のバケット／レプリケーションロール |
-| dr-s3-replication-enable | 同上 | **自リージョン**のバケット／レプリケーションロール |
-| dr-check-apigw | `apigateway:GET` | SELF の `/restapis/<id>/stages/<stage>` |
-| dr-check-lambda | `lambda:GetFunction` `ListEventSourceMappings` | SELF の対象関数／ESM は `*` |
-| dr-check-dynamodb | `dynamodb:DescribeTable` | SELF の対象テーブル |
-| dr-check-nlb | `elasticloadbalancing:DescribeTargetHealth` | `*` |
-| dr-check-s3 | `s3:ListBucket` `GetReplicationConfiguration` | SELF のバケット |
-| dr-check-alarms | `cloudwatch:DescribeAlarms` | `*` |
-| dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 
 注意点:
 
@@ -272,8 +285,9 @@ resource "aws_lambda_function" "nlb_check" {
   他のどの Lambda にも不要な権限なので見落としやすい
 - `dr-scheduler-*` の Resource は自チーム専用グループに限定する。default
   グループには他チームのスケジュールが同居しているため、権限としても外す
-- `dr-check-workload` の Pod / Node 参照権限は IAM ではなく Kubernetes RBAC
-  側（EKS アクセスエントリで view 相当にマッピング）
+- `dr-eks-check` のワークロード参照権限は IAM ではなく Kubernetes RBAC 側
+  （EKS アクセスエントリで指定 namespace の RoleBinding）。Node を見ないので
+  ClusterRoleBinding は不要
 - S3 は SSE-S3（AES256）で SSE-C 禁止のため、KMS 関連の権限は全関数で不要
 
 ## 環境変数
@@ -589,21 +603,22 @@ S3 へ吐き出して回収できる。
   VPC・サブネット・セキュリティグループに配置する（既存 Lambda と同じ設定）
 - 実行ロールを EKS アクセスエントリで view 相当にマッピングする
 
-## タイムアウト（外部通信すべてに設定）
+## タイムアウトと所要時間の試算
 
 応答しない相手を待ち続けて RTO を消費しないよう、外部と通信するすべての
 呼び出しにタイムアウトを設定している。
 
 | 呼び出し | 設定 | 場所 |
 |---|---|---|
-| AWS API（boto3） | connect 3 秒 / read 5 秒、リトライは standard モードの既定（合計 3 試行） | `dr_switch.core.aws.BOTO_CONFIG` |
+| AWS API（boto3） | connect 5 秒 / read 10 秒、リトライは standard モードの既定（合計 3 試行） | `dr_switch.core.aws.BOTO_CONFIG` |
 | Kubernetes API | connect 3 秒 / read 10 秒 | `dr_switch.eks.handlers.K8S_TIMEOUT` |
 | `aws eks update-kubeconfig` | 15 秒 | `dr_switch.eks.handlers.UPDATE_KUBECONFIG_TIMEOUT_SEC` |
 | ヘルスチェックの HTTPS | 5 秒 | `dr_switch.apigateway.handlers.HEALTH_TIMEOUT_SEC` |
 
-boto3 の既定は connect / read とも 60 秒で、DR 切替には長すぎる。
-`BOTO_CONFIG` を `dr_switch.core.aws.client()` に必ず適用しているため、素の
-`boto3.client()` を直接呼ばないこと。
+`read_timeout` を 10 秒にしているのは、呼ぶのが describe / update 系の
+コントロールプレーン API で通常 0.3 秒程度のため。30 倍の余裕があり、
+**正常な呼び出しを打ち切ることはない**（短くしすぎると、成功するはずの
+呼び出しが打ち切られて 3 回リトライされ、かえって遅くなる）。
 
 ### リトライは 2 層
 
@@ -617,17 +632,78 @@ boto3 の既定は connect / read とも 60 秒で、DR 切替には長すぎる
 回数を削ると、本来 SDK が吸収できる失敗が呼び出し元まで漏れる。
 `mode` だけ明示するのは、boto3 の既定がまだ非推奨の `legacy` のため。
 
-`RETRYABLE_CODES` が分類するのは **SDK が諦めた後**の失敗。SDK の短いバックオフで
-解消しなかった以上、より長い間隔での再試行が要る状態である、という判断になる。
-
-API 呼び出し 1 回の最悪待ち時間は `(3 + 5) * 3 = 24 秒`。
-
 **注意**: `max_attempts` は設定場所で意味が変わる。`Config(retries=...)` では
 リトライ回数（合計 N+1 回）、環境変数 `AWS_MAX_ATTEMPTS` では合計試行回数
 （1 でリトライ無効）。
 
-Lambda 自体のタイムアウトは 60 秒。いずれの関数も待機ループを持たないので、
-これ以上長くすると応答しない相手を待つだけになる。
+### ハンドラごとの所要時間
+
+障害の現れ方で分けて試算する。
+
+- **到達不能** … TCP 接続が張れない。DR で想定する主な状態。`connect_timeout × 3 = 15 秒 / 呼び出し`
+- **ハング** … 接続はできるが応答が返らない。まれ。`(connect + read) × 3 = 45 秒 / 呼び出し`
+
+リソース数の実績値: スケジュール 1 / バケット 1 / 関数 16 / テーブル 3 /
+namespace 1 / クラスタ 2 / ターゲットグループ 2。
+
+| ハンドラ | 呼出数 | 通常 | 到達不能 | ハング |
+|---|---|---|---|---|
+| apigateway.block / enable | 2 | 0.6s | 15s | 90s |
+| apigateway.check | 2 | 0.6s | 20s | 50s |
+| scheduler.block / enable | 3 | 0.9s | 15s | 135s |
+| s3.block / enable / check | 2 | 0.6s | 15s | 90s |
+| lambda_function.check | 16 | 4.8s | 15s | 720s |
+| dynamodb.check | 3 | 0.9s | 15s | 135s |
+| nlb.check | 2 | 0.6s | 15s | 90s |
+| cloudwatch.check | 1 | 0.3s | 15s | 45s |
+| eks.check | 8 | 4.8s | 15s | 54s |
+
+**Lambda のタイムアウトは全ハンドラ 60 秒**。到達不能の最大 20 秒 ＋ 通常の
+最大 5.1 秒 ＋ 余裕。AWS が示す式
+（初回 + リトライ回数 ×（connect + read）+ 20 秒の余裕）でも
+`(5+10)×3+20 = 65 秒` とほぼ一致する。
+
+ハングした場合は 60 秒で打ち切られ、Step Functions が失敗として扱う。
+765 秒待つことはない。
+
+**閉塞フェーズは旧リージョンが落ちていても 45 秒で完了する**
+（apigateway 15 + scheduler 15 + s3 15）。
+
+### lambda_function.check が見るもの
+
+**関数の `State` / `LastUpdateStatus` だけ**を確認する。
+
+VPC 設定のある関数は、長くアイドル状態が続くと Lambda が外部リソースを回収し
+`State` が `Inactive` になる。公式に「非アクティブな関数を呼び出すと**呼び出しは
+失敗し**、リソースが再作成されるまで Pending になる」と記載がある。待機側の関数は
+普段呼ばれないため、**切替の瞬間にこの状態になっている可能性がある**。
+Lambda が自動で遷移させ、実害が出る点で、確認する価値が明確にある。
+
+`GetFunction`（デプロイパッケージの URL 付き）ではなく
+`GetFunctionConfiguration` を使う。IAM も狭い権限で済む。
+
+`ListFunctions` で 1 回にまとめることはできない。公式に「ListFunctions は
+FunctionConfiguration のサブセットを返す。State 等を得るには GetFunction を
+使う」と明記されている。関数数ぶんの呼び出しは避けられない。
+
+### イベントソースマッピングを確認しない理由
+
+ESM の State は `Creating` / `Enabling` / `Enabled` / `Disabling` / `Disabled` /
+`Updating` / `Deleting` だが、**Lambda が自動で `Disabled` にするという記述は
+無い**。`Disabled` になるのは明示的な操作の結果で、切替ワークフローも触らない。
+
+遷移中の状態（`Creating` / `Enabling` / `Updating`）は収束待ちとして正当だが、
+待機側は前から動いているため、切替直前にデプロイした場合しか観測されない。
+
+結局、構成ドリフトしか検出できない。`spec.replicas` のドリフトを見ないと決め、
+CronJob の `suspend` を外したのと同じ基準で確認対象から外す。
+
+### 接続系エラーでのループ中断
+
+`run_per_item` は接続系エラー（`TRANSIENT_ERRORS`）のときだけ中断する。
+エンドポイントに到達できない状態は項目に依存しないので、残りを試しても
+同じ結果になり、項目数ぶんタイムアウトを積み上げるだけになるため。
+項目ごとのエラー（権限不足など）は従来どおり全件試行して集約する。
 
 ## dry_run
 

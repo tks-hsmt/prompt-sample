@@ -8,7 +8,10 @@ import boto3
 from botocore.config import Config
 
 # タイムアウトは既定の 60 秒では長すぎるため明示する。
-# 最悪待ち時間は (connect + read) * 試行回数 = (3 + 5) * 3 = 24 秒 / API 呼び出し。
+# read_timeout=10 は、呼ぶのが describe / update 系のコントロールプレーン API で
+# 通常 0.3 秒程度のため 30 倍の余裕を取った値。短くしすぎると成功するはずの
+# 呼び出しが打ち切られて 3 回リトライされ、かえって遅くなる。
+# 最悪待ち時間は接続不能で connect*3 = 15 秒、ハングで (5+10)*3 = 45 秒 / 呼び出し。
 #
 # リトライは standard モードの既定（合計 3 回）をそのまま使う。boto3 の既定は
 # まだ legacy で、AWS は legacy を非推奨としているためモードのみ明示する。
@@ -20,8 +23,8 @@ from botocore.config import Config
 #   Config(retries={"max_attempts": N})  -> リトライ回数（合計 N+1 回）
 #   環境変数 AWS_MAX_ATTEMPTS            -> 合計試行回数（1 でリトライ無効）
 BOTO_CONFIG = Config(
-    connect_timeout=3,
-    read_timeout=5,
+    connect_timeout=5,
+    read_timeout=10,
     retries={"mode": "standard"},
 )
 

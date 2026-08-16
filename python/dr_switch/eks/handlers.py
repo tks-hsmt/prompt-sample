@@ -16,6 +16,7 @@ kubeconfig は AWS CLI の update-kubeconfig で生成する。CA 証明書と
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -23,7 +24,7 @@ import subprocess
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from dr_switch.core import lambda_handler
+from dr_switch.core import NotRecoverableError, lambda_handler
 from dr_switch.eks.config import ClusterConfig, EksConfig
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ def _deployment_problems(apis: ClusterApis, namespaces: list[str]) -> dict:
     return problems
 
 
-def _daemonset_problems(apis: ClusterApis, namespaces: list[str]) -> dict:
+def _daemonset_problems(apis: ClusterApis, namespaces: list[str]) -> tuple[dict, dict]:
     """desiredNumberScheduled に達していない DaemonSet を返す.
 
     kubectl get daemonsets -n <ns> の DESIRED 列 / READY 列に相当。
@@ -89,7 +90,8 @@ def _daemonset_problems(apis: ClusterApis, namespaces: list[str]) -> dict:
     desiredNumberScheduled は Pod 数ではなくノード数由来のため、対象ノードが
     消えると 0 になり numberReady と一致してしまう。0 は異常として扱う。
     """
-    problems = {}
+    problems: dict = {}
+    fatal: dict = {}
     for ns in namespaces:
         for ds in apis.apps.list_namespaced_daemon_set(
                 ns, _request_timeout=K8S_TIMEOUT).items:
@@ -98,13 +100,14 @@ def _daemonset_problems(apis: ClusterApis, namespaces: list[str]) -> dict:
             ready = status.number_ready or 0
             misscheduled = status.number_misscheduled or 0
             if desired == 0:
-                problems[f"{ns}/{ds.metadata.name}"] = {
+                # 対象ノードが 1 台も無い。ノードが戻らない限り解消しない
+                fatal[f"{ns}/{ds.metadata.name}"] = {
                     "reason": "no node matched the daemonset selector"}
             elif ready < desired or misscheduled > 0:
                 problems[f"{ns}/{ds.metadata.name}"] = {
                     "ready": ready, "desired": desired,
                     "misscheduled": misscheduled}
-    return problems
+    return problems, fatal
 
 
 def _pending_pods(apis: ClusterApis, namespaces: list[str]) -> list[str]:
@@ -129,6 +132,7 @@ def _pending_pods(apis: ClusterApis, namespaces: list[str]) -> list[str]:
 @lambda_handler("eks-check", EksConfig)
 def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
     problems: dict[str, dict] = {}
+    fatal: dict[str, dict] = {}
 
     for cluster in cfg.clusters:
         found: dict[str, object] = {}
@@ -136,12 +140,18 @@ def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
 
         if deployments := _deployment_problems(apis, cluster.namespaces):
             found["deployments"] = deployments
-        if daemonsets := _daemonset_problems(apis, cluster.namespaces):
+        daemonsets, ds_fatal = _daemonset_problems(apis, cluster.namespaces)
+        if daemonsets:
             found["daemonsets"] = daemonsets
+        if ds_fatal:
+            fatal[cluster.name] = {"daemonsets": ds_fatal}
         if pending := _pending_pods(apis, cluster.namespaces):
             found["pending_pods"] = pending
 
         if found:
             problems[cluster.name] = found
 
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"workload": fatal}, ensure_ascii=False, default=str))
     return problems
