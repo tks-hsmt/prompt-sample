@@ -15,9 +15,17 @@ scheduler クライアントを叩く。
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from dr_switch.core import client, lambda_handler, run_per_item
 from dr_switch.scheduler.config import SchedulerConfig
+
+if TYPE_CHECKING:
+    from mypy_boto3_scheduler.literals import ScheduleStateType
+
+# 値は boto3-stubs の ScheduleStateType に対応（ENABLED / DISABLED の 2 値）。
+STATE_ENABLED: ScheduleStateType = "ENABLED"
+STATE_DISABLED: ScheduleStateType = "DISABLED"
 
 # get_schedule が返すもののうち、update_schedule に渡せない読み取り専用フィールド
 logger = logging.getLogger(__name__)
@@ -45,7 +53,7 @@ def _set_state(scheduler, cfg: SchedulerConfig, name: str, state: str) -> dict:
 def _set_schedules(cfg: SchedulerConfig, *, enabled: bool, dry_run: bool,
                    best_effort: bool) -> None:
     scheduler = client("scheduler", cfg.region)
-    want = "ENABLED" if enabled else "DISABLED"
+    want = STATE_ENABLED if enabled else STATE_DISABLED
 
     # aws scheduler list-schedules --group-name <g> の Schedules[].State
     paginator = scheduler.get_paginator("list_schedules")

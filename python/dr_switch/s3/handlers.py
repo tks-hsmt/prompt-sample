@@ -19,6 +19,7 @@ PutBucketReplication は宛先バケットの存在を検証する。宛先リ�
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
 
@@ -30,7 +31,14 @@ from dr_switch.core import (
 )
 from dr_switch.s3.config import S3Config
 
+if TYPE_CHECKING:
+    from mypy_boto3_s3.literals import ReplicationRuleStatusType
+
 NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
+
+# 値は boto3-stubs の ReplicationRuleStatusType に対応（Enabled / Disabled の 2 値）。
+RULE_ENABLED: ReplicationRuleStatusType = "Enabled"
+RULE_DISABLED: ReplicationRuleStatusType = "Disabled"
 
 
 def _set_replication(cfg: S3Config, bucket: str, *,
@@ -42,7 +50,7 @@ def _set_replication(cfg: S3Config, bucket: str, *,
     get -> 修正 -> put の順で行う。
     """
     s3 = client("s3", cfg.region)
-    want = "Enabled" if enabled else "Disabled"
+    want = RULE_ENABLED if enabled else RULE_DISABLED
 
     # aws s3api get-bucket-replication / put-bucket-replication --bucket <b>
     configuration = s3.get_bucket_replication(
@@ -117,7 +125,7 @@ def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
             continue
 
         disabled = {rule["ID"]: rule["Status"] for rule in rules
-                    if rule["Status"] != "Enabled"}
+                    if rule["Status"] != RULE_ENABLED}
         if disabled:
             problems[bucket] = {"rules_not_enabled": disabled}
 

@@ -105,7 +105,7 @@ def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict
 | s3 | ルールが `Disabled` | レプリケーション設定が存在しない |
 | eks | `readyReplicas` 不足 / Pending Pod | DaemonSet の `desiredNumberScheduled == 0` |
 | nlb | `initial` が残っている | — |
-| apigateway | 開放の反映待ち（429） | — |
+| apigateway | `apiStatus: PENDING` / スロットリング未復元 | `apiStatus: FAILED` |
 
 **操作系と観測系でデコレータを分けない。** 呼び出し元は例外の有無だけで
 判断するので、契約は同一になる。分けていたときは観測系が AWS 例外を素通しして
@@ -263,7 +263,7 @@ resource "aws_lambda_function" "nlb_check" {
 |---|---|---|
 | dr-apigateway-block | `apigateway:GET` `apigateway:PATCH` | **閉塞対象**の `/restapis/<id>/stages/<stage>` |
 | dr-apigateway-enable | `apigateway:GET` `apigateway:PATCH` | **自リージョン**の `/restapis/<id>/stages/<stage>` |
-| dr-apigateway-check | `apigateway:GET` | 自リージョンの `/restapis/<id>/stages/<stage>` |
+| dr-apigateway-check | `apigateway:GET` | 自リージョンの `/restapis/<id>` と `/restapis/<id>/stages/<stage>` |
 | dr-scheduler-block | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **閉塞対象**の自チームグループのみ／スケジュール実行ロール |
 | dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
 | dr-s3-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象**のバケット／レプリケーションロール |
@@ -419,6 +419,97 @@ Activate(self): scheduler -> apigw       # 失敗は未捕捉 = 停止
 Step Functions から `{"throttle": {"rate": ..., "burst": ...}}` で上書きできる。
 
 なお `op:remove` は非サポートのため、`replace` で値を書き換えることしかできない。
+
+### check が確認するもの
+
+| 項目 | API | 判定 |
+|---|---|---|
+| API の状態 | `get_rest_api` の `apiStatus` | `AVAILABLE` / `UPDATING` は正常 |
+| スロットリング値 | `get_stage` の `methodSettings["*/*"]` | 環境変数の値と一致するか |
+
+`apiStatus` の取り得る値は `AVAILABLE` / `UPDATING` / `PENDING` / `FAILED`。
+**公式が意味を説明しているのは 1 つだけ**で、「ステータスメッセージが `UPDATING`
+のときも呼び出しは可能」と記載がある。`PENDING` / `FAILED` の意味を説明した
+記述は公式・コミュニティとも見つからず、名称からの判断で `PENDING` を
+`RetryableError`、`FAILED` を `NotRecoverableError` に振り分けている。
+
+### ステータス値の扱い
+
+boto3 は **AWS の SDK の中で例外的に enum を Python の定数として提供しない**。
+JSON のサービスモデルから実行時にクライアントを組み立てる設計のため、
+レスポンスは素の dict、enum は素の文字列になる（Go / Kotlin / Java の SDK には
+型付き enum がある）。したがって boto3 では文字列比較が標準的な書き方になる。
+
+そのうえで、扱う定数には性質の違う 2 種類がある。
+
+| 種類 | 例 | AWS から取れるか |
+|---|---|---|
+| 値の集合 | `ApiStatus` の取り得る値 | **取れる**。二重定義は避ける |
+| 値の分類 | どの値が「正常」「待てば直る」か | **取れない**。業務判断なので書くしかない |
+
+**値の集合には `boto3-stubs` の `Literal` を使う。** 実行時には不要なので
+`if TYPE_CHECKING:` の中で import する。型チェッカが「enum に無い値を書いた」を
+検出できる。
+
+```python
+if TYPE_CHECKING:
+    from mypy_boto3_lambda.literals import StateType
+
+HEALTHY_STATES: frozenset[StateType] = frozenset({"Active"})
+```
+
+**分類は enum の全値を明示する。** 未分類の値が出ないよう、`HEALTHY` /
+`TRANSIENT` / `FATAL` の 3 集合で全値を覆う。boto3 を更新して AWS が値を
+追加した場合、実装は未知の値を「待っても解消しない」側に倒す（保守的な既定）。
+
+| 対象 | enum | 分類済み |
+|---|---|---|
+| apigateway | `ApiStatus` | 4 値 |
+| lambda | `State` | 8 値 |
+| lambda | `LastUpdateStatus` | 3 値 |
+| dynamodb | `TableStatus` | 8 値 |
+| nlb | `TargetHealthStateEnum` | 7 値 |
+| scheduler | `ScheduleState` | 2 値 |
+| s3 | `ReplicationRuleStatus` | 2 値 |
+| cloudwatch | `StateValue` | ALARM のみ取得対象 |
+
+EKS のワークロード確認は Kubernetes API を使うため、この仕組みの対象外。
+`kubernetes` パッケージは同様の Literal を提供しない。
+
+### boto3 のバージョン要件
+
+`apiStatus` は **botocore 1.41.0 でモデルに追加された**フィールド。
+boto3/botocore はサービスの応答を自分が持つ API モデルに従ってパースするため、
+**モデルに無いフィールドはサービスが返していても捨てられる**。
+
+実測（1.40.x と 1.41.0 でパース結果を比較）で確認済み。
+
+| boto3 | botocore | `apiStatus` |
+|---|---|---|
+| 1.40.11 | 1.40.76 | **落とされる** |
+| 1.41.0 | 1.41.6 | 取得できる |
+| 1.43.72（最新） | 1.43.72 | 取得できる |
+
+`requirements.txt` は **`boto3==1.43.72`**（執筆時点の最新）を指定している。
+**1.41.0 未満に下げると、`apigateway` の check の状態確認が黙ってスキップされる**
+（フィールドが無い場合は異常として扱わない実装のため、失敗にもならない）。
+
+古いバージョンに固定する利点は無い。新しいサービスフィールドが取れなくなる
+だけで、今回の問題がまさにそれだった。
+
+なお開発環境の AWS CLI 2.30.4 は botocore 1.40.x 相当で、`get-rest-api` の
+出力に `apiStatus` が現れない。サービスは返しているので、`--debug` で
+Response body を見れば確認できる。
+
+### HTTP リクエストを投げない理由
+
+切替で変更するのはステージのスロットリングだけで、これはステージ設定のため
+再デプロイを伴わない。設定が反映されたことは `get_stage` で確認できる。
+
+統合先まで含めた到達性を確認するには副作用の無いエンドポイント（Mock 統合の
+`/health` など）が必要になるが、既存 API に副作用の無い参照系が無いため
+用意していない。切替後に実際にトラフィックが流れたかは、CloudWatch の
+`Count` / `5XXError` メトリクスで追跡する。
 
 ### リソースポリシー Deny 方式を採らない理由
 

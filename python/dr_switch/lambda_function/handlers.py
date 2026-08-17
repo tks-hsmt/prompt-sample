@@ -15,13 +15,32 @@ State が Inactive になる。その状態で呼び出すと最初の 1 回は�
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
 from dr_switch.lambda_function.config import LambdaConfig
 
-# 待てば収束する状態。リソース作成中・デプロイ中で、時間が経てば Active になる。
-TRANSIENT_STATES = frozenset({"Pending"})
-TRANSIENT_UPDATE_STATUSES = frozenset({"InProgress"})
+if TYPE_CHECKING:
+    from mypy_boto3_lambda.literals import LastUpdateStatusType, StateType
+
+# State の分類。取り得る値は boto3-stubs の StateType（Literal）に対応し、
+# テストで網羅性を検証している。
+#
+# Inactive は公式に「呼び出すことで再アクティブ化できる」とあるが、状態を
+# 見るだけでは何も起きず、切替の確認フェーズでは誰も呼び出さないため、
+# 待っても解消しない側に分類する。
+# Deactivating / Deactivated / ActiveNonInvocable / Deleting の意味は公式に
+# 記載が無く、いずれも呼び出せる状態ではないため停止側に分類する。
+HEALTHY_STATES: frozenset[StateType] = frozenset({"Active"})
+TRANSIENT_STATES: frozenset[StateType] = frozenset({"Pending"})
+FATAL_STATES: frozenset[StateType] = frozenset({
+    "Inactive", "Failed", "Deactivating", "Deactivated",
+    "ActiveNonInvocable", "Deleting",
+})
+
+HEALTHY_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"Successful"})
+TRANSIENT_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"InProgress"})
+FATAL_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"Failed"})
 
 
 @lambda_handler("lambda-check", LambdaConfig)
@@ -43,7 +62,7 @@ def check(cfg: LambdaConfig, event: dict, *, dry_run: bool, context) -> dict:
         if state != "Active":
             issue["state"] = state
             issue["state_reason"] = conf.get("StateReason")
-        if update != "Successful":
+        if update not in HEALTHY_UPDATE_STATUSES:
             issue["last_update_status"] = update
             issue["last_update_status_reason"] = conf.get("LastUpdateStatusReason")
         if not issue:

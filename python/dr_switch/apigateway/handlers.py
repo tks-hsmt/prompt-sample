@@ -4,24 +4,35 @@
 スロットリングはステージ設定なので再デプロイは不要。
 
 必要な IAM（自関数が対象とするリージョンの ARN のみ）:
-    apigateway:GET / apigateway:PATCH
-        arn:aws:apigateway:<リージョン>::/restapis/<id>/stages/<stage>
+    block / enable  apigateway:GET / apigateway:PATCH
+                    .../restapis/<id>/stages/<stage>
+    check           apigateway:GET
+                    .../restapis/<id>  と  .../restapis/<id>/stages/<stage>
 
 ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
     block   閉塞。入力 {"dry_run": bool}
     enable  開放。入力 {"dry_run": bool,
             "throttle": {"rate": float, "burst": int}}  # throttle は任意
-    check   開放が効いているか確認。入力 {}
+    check   API の状態とスロットリング値を確認。入力 {"dry_run": bool}
+
+check が HTTP リクエストを投げない理由:
+    切替で変更するのはステージのスロットリングだけで、これはステージ設定
+    のため再デプロイを伴わない。設定が反映されたことは get_stage で確認
+    できる。統合先まで含めた到達性の確認には副作用の無いエンドポイントが
+    必要になるが、それは用意していない。
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import urllib.error
-import urllib.request
+from typing import TYPE_CHECKING
 
 from dr_switch.apigateway.config import ApiGatewayConfig
-from dr_switch.core import client, lambda_handler
+from dr_switch.core import NotRecoverableError, client, lambda_handler
+
+if TYPE_CHECKING:
+    from mypy_boto3_apigateway.literals import ApiStatusType
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +45,19 @@ BURST_PATH = f"/{ALL_METHODS}/throttling/burstLimit"
 BLOCKED_RATE = 0.0
 BLOCKED_BURST = 0
 
-HEALTH_TIMEOUT_SEC = 5
-HTTP_OK = 200
+# apiStatus の分類。取り得る値は boto3-stubs の ApiStatusType（Literal）に
+# 対応し、テストで網羅性を検証している。
+#
+# UPDATING を正常扱いにするのは、公式に「ステータスメッセージが UPDATING の
+# ときも呼び出しは可能」と明記があるため。PENDING / FAILED の意味は公式に
+# 記載が無く、名称からの判断。
+#
+# このフィールドは botocore 1.41.0 でモデルに追加された。それ未満では
+# サービスが返していてもパース時に落とされるため、requirements.txt で
+# boto3 を 1.41.0 以上に固定している。取得できない場合は確認をスキップする。
+HEALTHY_API_STATUSES: frozenset[ApiStatusType] = frozenset({"AVAILABLE", "UPDATING"})
+TRANSIENT_API_STATUSES: frozenset[ApiStatusType] = frozenset({"PENDING"})
+FATAL_API_STATUSES: frozenset[ApiStatusType] = frozenset({"FAILED"})
 
 
 def _current_throttle(stage: dict) -> tuple[float | None, int | None]:
@@ -102,30 +124,32 @@ def enable(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dic
 
 @lambda_handler("apigateway-check", ApiGatewayConfig)
 def check(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
-    """開放が効いているか確認する.
-
-    設定確認だけでは「設定は正しいが通らない」を検出できないため、
-    ヘルスチェック URL へ実リクエストを 1 回投げる。閉塞が解除されて
-    いなければ 429 が返る。
-    """
+    """API の状態と、スロットリングが開放後の値に戻っているかを確認する。"""
     apigw = client("apigateway", cfg.region)
+    problems: dict[str, object] = {}
+    fatal: dict[str, object] = {}
+
+    # aws apigateway get-rest-api --rest-api-id <id> の apiStatus
+    api = apigw.get_rest_api(restApiId=cfg.rest_api_id)
+    status = api.get("apiStatus")
+    if status is not None and status not in HEALTHY_API_STATUSES:
+        detail = {"api_status": status,
+                  "api_status_message": api.get("apiStatusMessage")}
+        target = problems if status in TRANSIENT_API_STATUSES else fatal
+        target["api"] = detail
+
+    # aws apigateway get-stage --rest-api-id <id> --stage-name <stage>
+    #   の methodSettings."*/*".throttlingRateLimit / throttlingBurstLimit
     stage = apigw.get_stage(restApiId=cfg.rest_api_id, stageName=cfg.stage)
     rate, burst = _current_throttle(stage)
+    if (rate, burst) != (cfg.throttle_rate, cfg.throttle_burst):
+        problems["throttle"] = {
+            "rate": rate, "burst": burst,
+            "expected_rate": cfg.throttle_rate,
+            "expected_burst": cfg.throttle_burst,
+        }
 
-    if not cfg.health_url:
-        return {}
-
-    # スキームを検証してから開く。設定ミスで file: 等が渡ることを防ぐ。
-    if not cfg.health_url.startswith("https://"):
-        raise ValueError(f"HEALTH_URL must be https: {cfg.health_url}")
-
-    try:
-        with urllib.request.urlopen(  # noqa: S310 - スキームは上で検証済み
-                cfg.health_url, timeout=HEALTH_TIMEOUT_SEC) as response:
-            status = response.status
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-
-    if status != HTTP_OK:
-        return {"http_status": status, "rate": rate, "burst": burst}
-    return {}
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"apigateway": fatal}, ensure_ascii=False, default=str))
+    return problems
