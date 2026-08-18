@@ -20,11 +20,13 @@ import json
 import logging
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from botocore.config import Config
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
-from dr_switch.core import NotRecoverableError, lambda_handler
+from dr_switch.core import NotRecoverableError, client, lambda_handler
 from dr_switch.eks.config import ClusterConfig, EksConfig
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ AWS_CLI = os.environ.get("AWS_CLI_PATH", "aws")
 UPDATE_KUBECONFIG_TIMEOUT_SEC = 15
 # Kubernetes API 呼び出しのタイムアウト (connect, read)
 K8S_TIMEOUT = (3, 10)
+
 
 
 class ClusterApis:
@@ -155,3 +158,79 @@ def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
         raise NotRecoverableError(
             json.dumps({"workload": fatal}, ensure_ascii=False, default=str))
     return problems
+
+
+def _invoke_config(timeout: int) -> Config:
+    """Pod 再起動 Lambda を同期呼び出しするための Config を返す.
+
+    BOTO_CONFIG の read_timeout=10 秒では、呼ばれる側が Pod の起動完了を
+    待つ実装のため足りない。呼ばれる側の Timeout に合わせて
+    POD_RESTART_TIMEOUT で設定する。
+
+    リトライは行わない。呼ばれる側が冪等とは限らないので、同じ再起動が
+    二重に走るのを避ける。
+    """
+    return Config(
+        connect_timeout=5,
+        read_timeout=timeout,
+        retries={"mode": "standard", "max_attempts": 0},
+    )
+
+
+def _invoke_restart(lam, name: str, *, dry_run: bool) -> None:
+    """Pod 再起動 Lambda を 1 つ同期呼び出しする.
+
+    aws lambda invoke --function-name <name> --invocation-type RequestResponse
+      の StatusCode / FunctionError に相当。
+
+    FunctionError が返る場合は呼ばれた側が例外で終了している。応答本文に
+    エラーの詳細が入るので、そのまま記録して失敗として扱う。
+    """
+    if dry_run:
+        logger.info("would invoke pod restart function: %s", name)
+        return
+
+    response = lam.invoke(FunctionName=name, InvocationType="RequestResponse")
+    error = response.get("FunctionError")
+    if error:
+        payload = response["Payload"].read().decode("utf-8", errors="replace")
+        msg = f"{name}: {error}: {payload[:500]}"
+        raise NotRecoverableError(msg)
+
+    logger.info("pod restart invoked: %s status=%s",
+                name, response.get("StatusCode"))
+
+
+@lambda_handler("eks-restart-pods", EksConfig)
+def restart_pods(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
+    """既存の Pod 再起動 Lambda を並列に呼び出す.
+
+    対象クラスタ・namespace・Pod は呼ばれる側が保持しているため、こちらは
+    関数名のリストを実行するだけ。順序依存が無いので並列に投げる。
+    呼ばれる側は Pod の起動完了を待つため、逐次だと本数ぶん時間が積み上がる。
+
+    **全件を投げてから結果を集める。** 途中で失敗しても他は既に走っている
+    ので、中断はできない。失敗が 1 件でもあれば NotRecoverableError を
+    送出し、どの関数が失敗したかをすべて載せる。
+    """
+    lam = client("lambda", cfg.region, _invoke_config(cfg.pod_restart_timeout))
+    names = cfg.pod_restart_functions
+    if not names:
+        return {}
+
+    failures: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        futures = {pool.submit(_invoke_restart, lam, name, dry_run=dry_run): name
+                   for name in names}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001 - 全件の結果を集めるため
+                failures[name] = f"{type(exc).__name__}: {exc}"
+
+    if failures:
+        raise NotRecoverableError(
+            json.dumps({"pod_restart": failures}, ensure_ascii=False,
+                       default=str))
+    return {}

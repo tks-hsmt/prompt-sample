@@ -30,10 +30,14 @@ BOTO_CONFIG = Config(
 
 
 @cache
-def client(service: str, region: str):
+def client(service: str, region: str, config: Config = BOTO_CONFIG):
     """リージョンを明示してクライアントを返す（結果はキャッシュする）.
 
     素の boto3.client() を直接呼ぶと BOTO_CONFIG が効かないため、
-    必ずこの関数を使うこと。
+    必ずこの関数を使うこと。呼び出し先の実行時間が長いなど、既定と違う
+    タイムアウトが要る場合だけ config を渡す。
+
+    Config は同一性でハッシュされるため、モジュールレベルの定数を渡すこと。
+    呼び出しのたびに Config(...) を生成すると、キャッシュが増え続ける。
     """
-    return boto3.client(service, region_name=region, config=BOTO_CONFIG)
+    return boto3.client(service, region_name=region, config=config)

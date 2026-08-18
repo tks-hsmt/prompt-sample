@@ -144,7 +144,7 @@ dr_switch/
   cloudwatch/
     config.py  handlers.py    # check
   eks/
-    config.py  handlers.py    # check
+    config.py  handlers.py    # restart_pods / check
   efs/
     config.py  handlers.py    # check
 tests/
@@ -180,6 +180,7 @@ Dockerfile
 | dr-dynamodb-check | `dr_switch.dynamodb.handlers.check` | 観測 | 自リージョン |
 | dr-nlb-check | `dr_switch.nlb.handlers.check` | 観測 | 自リージョン |
 | dr-cloudwatch-check | `dr_switch.cloudwatch.handlers.check` | 観測 | 自リージョン |
+| dr-eks-restart-pods | `dr_switch.eks.handlers.restart_pods` | 変更 | 自リージョン |
 | dr-eks-check | `dr_switch.eks.handlers.check` | 観測 | 自リージョン |
 | dr-efs-check | `dr_switch.efs.handlers.check` | 観測 | 自リージョン |
 
@@ -237,7 +238,7 @@ def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
-15 本で同一イメージを共有し、ハンドラだけ変える。
+16 本で同一イメージを共有し、ハンドラだけ変える。
 
 ```hcl
 resource "aws_lambda_function" "nlb_check" {
@@ -278,6 +279,7 @@ resource "aws_lambda_function" "nlb_check" {
 | dr-dynamodb-check | `dynamodb:DescribeTable` | 自リージョンの対象テーブル |
 | dr-nlb-check | `elasticloadbalancing:DescribeLoadBalancers` `DescribeTargetHealth` | `*` |
 | dr-cloudwatch-check | `cloudwatch:DescribeAlarms` | `*` |
+| dr-eks-restart-pods | `lambda:InvokeFunction` | 自リージョンの Pod 再起動関数 |
 | dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 | dr-efs-check | `elasticfilesystem:DescribeFileSystems` `DescribeMountTargets` | 自リージョンのファイルシステム |
 
@@ -650,6 +652,48 @@ Controller は Endpoints / EndpointSlices からターゲットを解決し、�
 
 Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグループに
 現れないため、`dr-check-workload` との併用が前提。
+
+## Pod の再起動
+
+既存の Pod 再起動 Lambda を**並列に**呼び出す。対象クラスタ・namespace・Pod は
+**呼ばれる側が保持している**ため、こちらは関数名のリストを持つだけ
+（`POD_RESTART_FUNCTIONS`）。
+
+```python
+# aws lambda invoke --function-name <name> --invocation-type RequestResponse
+#   の StatusCode / FunctionError
+```
+
+### 並列に呼ぶ理由
+
+呼ばれる側は **Pod の起動完了を待つ**実装のため、逐次だと本数ぶん時間が
+積み上がる。順序依存が無いので `ThreadPoolExecutor` で全件同時に投げる。
+boto3 のクライアントはスレッドセーフなので共有してよい。
+
+### 失敗の扱い
+
+**全件を投げてから結果を集める。** 途中で失敗しても他は既に走っているので
+中断はできない。失敗が 1 件でもあれば `NotRecoverableError` を送出し、
+どの関数が失敗したかをすべて載せる。
+
+`FunctionError` が返る場合は呼ばれた側が例外で終了している。応答本文の
+先頭 500 文字を記録する。
+
+### タイムアウト
+
+`BOTO_CONFIG` の `read_timeout=10` 秒では呼ばれる側の実行時間に足りない。
+`POD_RESTART_TIMEOUT`（既定 300 秒）で設定し、**呼ばれる側の Lambda の
+Timeout に合わせる**。この関数自体の Lambda タイムアウトも、それを上回る
+値にする必要がある。
+
+リトライは行わない（`max_attempts=0`）。呼ばれる側が冪等とは限らないため、
+同じ再起動が二重に走るのを避ける。
+
+### 収束の確認は check が担当する
+
+`restart_pods` が見るのは呼び出しが成功したことまで。再起動後に Pod が
+Ready になったかは `eks` の check（`readyReplicas >= spec.replicas`）で
+確認する。フェーズ順序は restart_pods を先、check を後にする。
 
 ## EFS の確認内容
 
