@@ -435,6 +435,106 @@
               "End": true
             }
           }
+        },
+        {
+          "StartAt": "CheckScheduler",
+          "States": {
+            "CheckScheduler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_scheduler_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "SchedulerNg",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "SchedulerOk"
+            },
+            "SchedulerOk": {
+              "Type": "Pass",
+              "Output": {
+                "check": "scheduler",
+                "ready": true
+              },
+              "End": true
+            },
+            "SchedulerNg": {
+              "Type": "Pass",
+              "Output": {
+                "check": "scheduler",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckEfs",
+          "States": {
+            "CheckEfs": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_efs_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "EfsNg",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "EfsOk"
+            },
+            "EfsOk": {
+              "Type": "Pass",
+              "Output": {
+                "check": "efs",
+                "ready": true
+              },
+              "End": true
+            },
+            "EfsNg": {
+              "Type": "Pass",
+              "Output": {
+                "check": "efs",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
         }
       ]
     },

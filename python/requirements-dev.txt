@@ -3,6 +3,6 @@
 # boto3 は enum を Python の定数として提供しないため、型スタブの Literal を使う。
 # 実行時には不要なので TYPE_CHECKING の中でのみ import する。
 # バージョンは boto3 と揃える。
-boto3-stubs[apigateway,cloudwatch,dynamodb,elbv2,lambda,s3,scheduler]==1.43.72
+boto3-stubs[apigateway,cloudwatch,dynamodb,efs,elbv2,lambda,s3,scheduler]==1.43.72
 
 ruff==0.9.6

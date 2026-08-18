@@ -145,6 +145,8 @@ dr_switch/
     config.py  handlers.py    # check
   eks/
     config.py  handlers.py    # check
+  efs/
+    config.py  handlers.py    # check
 tests/
 Dockerfile
 ```
@@ -170,6 +172,7 @@ Dockerfile
 | dr-apigateway-check | `dr_switch.apigateway.handlers.check` | 観測 | 自リージョン |
 | dr-scheduler-block | `dr_switch.scheduler.handlers.block` | 変更 | 閉塞対象 |
 | dr-scheduler-enable | `dr_switch.scheduler.handlers.enable` | 変更 | 自リージョン |
+| dr-scheduler-check | `dr_switch.scheduler.handlers.check` | 観測 | 自リージョン |
 | dr-s3-block | `dr_switch.s3.handlers.block` | 変更 | 閉塞対象 |
 | dr-s3-enable | `dr_switch.s3.handlers.enable` | 変更 | 自リージョン |
 | dr-s3-check | `dr_switch.s3.handlers.check` | 観測 | 自リージョン |
@@ -178,6 +181,7 @@ Dockerfile
 | dr-nlb-check | `dr_switch.nlb.handlers.check` | 観測 | 自リージョン |
 | dr-cloudwatch-check | `dr_switch.cloudwatch.handlers.check` | 観測 | 自リージョン |
 | dr-eks-check | `dr_switch.eks.handlers.check` | 観測 | 自リージョン |
+| dr-efs-check | `dr_switch.efs.handlers.check` | 観測 | 自リージョン |
 
 `dr_switch.s3.handlers` の block / enable は **S3 案 A を採用する場合のみ**デプロイする。
 
@@ -233,7 +237,7 @@ def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
-13 本で同一イメージを共有し、ハンドラだけ変える。
+15 本で同一イメージを共有し、ハンドラだけ変える。
 
 ```hcl
 resource "aws_lambda_function" "nlb_check" {
@@ -266,6 +270,7 @@ resource "aws_lambda_function" "nlb_check" {
 | dr-apigateway-check | `apigateway:GET` | 自リージョンの `/restapis/<id>` と `/restapis/<id>/stages/<stage>` |
 | dr-scheduler-block | `scheduler:ListSchedules` `GetSchedule` `UpdateSchedule` `iam:PassRole` | **閉塞対象**の自チームグループのみ／スケジュール実行ロール |
 | dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
+| dr-scheduler-check | `scheduler:GetScheduleGroup` `scheduler:ListSchedules` | 自リージョンの自チームグループのみ |
 | dr-s3-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象**のバケット／レプリケーションロール |
 | dr-s3-enable | 同上 | **自リージョン**のバケット／レプリケーションロール |
 | dr-s3-check | `s3:GetReplicationConfiguration` | 自リージョンのバケット |
@@ -274,6 +279,7 @@ resource "aws_lambda_function" "nlb_check" {
 | dr-nlb-check | `elasticloadbalancing:DescribeLoadBalancers` `DescribeTargetHealth` | `*` |
 | dr-cloudwatch-check | `cloudwatch:DescribeAlarms` | `*` |
 | dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
+| dr-efs-check | `elasticfilesystem:DescribeFileSystems` `DescribeMountTargets` | 自リージョンのファイルシステム |
 
 東京・大阪は同一 AWS アカウント。両リージョンのリソースを同じ実行ロールで
 操作できることを前提にしている。
@@ -377,7 +383,7 @@ module "dr_nlb_check" {            # 東京を確認する
 - 同じ例外名でも、ステートごとに間隔と回数を別々に指定できる
 - 閉塞（role=peer）の失敗は `ResultPath` に記録して続行。リソース単位に
   分かれているので、どれが閉塞できなかったかが実行履歴からそのまま分かる
-- 観測系 7 本は `Parallel` で並列実行する。どれか 1 つでも
+- 観測系 9 本は `Parallel` で並列実行する。どれか 1 つでも
   `RetryableError` で失敗すれば Parallel 全体が失敗する
 
 ## ループを Lambda 内で回す理由（Map を使わない）
@@ -566,6 +572,21 @@ tfvars で両リージョンとも `run_replication = true` に固定する。
 ないため `Enabled` にする利点がなく、誤削除が両リージョンへ波及するリスク
 だけが残る。誤削除時に切替先へコピーが残ることが保護になる。
 
+## EventBridge Scheduler の確認内容
+
+| 対象 | API | 判定 |
+|---|---|---|
+| グループの状態 | `get_schedule_group` の `State` | `ACTIVE` が正常。`DELETING` は `NotRecoverableError` |
+| スケジュールの State | `list_schedules` の `Schedules[].State` | すべて `ENABLED` |
+
+`ScheduleGroupState` は `ACTIVE` / `DELETING` の 2 値。`DELETING` はグループの
+削除処理中で、そのグループのスケジュールは動かない。待っても `ACTIVE` には
+戻らないため `NotRecoverableError` に振り分ける。切替ワークフローが操作しない
+値なので、`DynamoDB` の `TableStatus` と同じ位置づけ。
+
+スケジュールの `State` は切替で操作した値そのものなので、`apigateway` が
+スロットリング値を確認しているのと同じ「反映確認」にあたる。
+
 ## EventBridge Scheduler
 
 イベント駆動は EventBridge **Rules ではなく Scheduler**（スケジュール）を
@@ -629,6 +650,33 @@ Controller は Endpoints / EndpointSlices からターゲットを解決し、�
 
 Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグループに
 現れないため、`dr-check-workload` との併用が前提。
+
+## EFS の確認内容
+
+EKS の Pod が EFS CSI ドライバ経由で利用する。
+
+| 対象 | API | 判定 |
+|---|---|---|
+| ファイルシステム | `describe_file_systems` の `LifeCycleState` | `available` が正常 |
+| マウントターゲット | `describe_mount_targets` の `LifeCycleState` | `available` が正常 |
+
+`LifeCycleState` は `creating` / `available` / `updating` / `deleting` /
+`deleted` / `error` の 6 値。`creating` / `updating` は待てば変わるので
+`RetryableError`、それ以外は `NotRecoverableError`。
+
+### eks の check と重複しない理由
+
+**既にマウント済みの Pod は NFS マウントを保持し続ける。** マウントターゲットが
+`error` になっても Pod は動き続けるため、`eks` の check は `ready == want` で
+正常と判定する。切替後に Pod が再起動すると、そこで初めてマウントに失敗する。
+
+Lambda の `Inactive` と同じく「必要になるまで気づけない」性質なので、独立して
+確認する。
+
+### アクセスポイントを確認しない理由
+
+EFS CSI ドライバの動的プロビジョニングでは PVC の増減に応じてアクセスポイントが
+作られる。使われていない古いものを拾って誤検知しうるため対象にしない。
 
 ## 存在確認は行わない
 
