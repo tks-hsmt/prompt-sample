@@ -1,9 +1,11 @@
-"""NLB の登録済みターゲットが健全か確認する.
+"""NLB がトラフィックを受けられる状態か確認する.
 
-判定は unhealthy 系 == 0 かつ 遷移中 == 0 かつ healthy >= 1。
-登録済みのターゲットが健全かだけを見る（必要数の判定は行わない）。
+ロードバランサ自体の状態と、登録済みターゲットの健全性を見る。
+ターゲットの判定は unhealthy 系 == 0 かつ 遷移中 == 0 かつ healthy >= 1。
+必要数の判定は行わない。
 
 必要な IAM:
+    elasticloadbalancing:DescribeLoadBalancers
     elasticloadbalancing:DescribeTargetHealth
 
 ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
@@ -12,13 +14,28 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
-from dr_switch.core import client, lambda_handler
+from dr_switch.core import NotRecoverableError, client, lambda_handler
 from dr_switch.nlb.config import NlbConfig
 
 if TYPE_CHECKING:
-    from mypy_boto3_elbv2.literals import TargetHealthStateEnumType
+    from mypy_boto3_elbv2.literals import (
+        LoadBalancerStateEnumType,
+        TargetHealthStateEnumType,
+    )
+
+# LoadBalancer.State.Code の分類。公式の説明は次の通り。
+#   provisioning    … 初期状態。セットアップ中
+#   active          … セットアップ完了。トラフィックをルーティングできる
+#   active_impaired … ルーティングはしているがスケールに必要なリソースが不足
+#   failed          … セットアップに失敗した
+# active_impaired はトラフィックを流せるが不安定なので、待てば直る側に置く。
+HEALTHY_LB_STATES: frozenset[LoadBalancerStateEnumType] = frozenset({"active"})
+TRANSIENT_LB_STATES: frozenset[LoadBalancerStateEnumType] = frozenset({
+    "provisioning", "active_impaired",
+})
 
 # TargetHealth.State の分類。値は boto3-stubs の TargetHealthStateEnumType に対応。
 HEALTHY_TARGET_STATES: frozenset[TargetHealthStateEnumType] = frozenset({"healthy"})
@@ -36,6 +53,19 @@ UNHEALTHY_TARGET_STATES: frozenset[TargetHealthStateEnumType] = frozenset({
 def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
     elb = client("elbv2", cfg.region)
     problems: dict[str, dict] = {}
+    fatal: dict[str, dict] = {}
+
+    if cfg.load_balancer_arns:
+        # aws elbv2 describe-load-balancers --load-balancer-arns <arn>
+        #   の LoadBalancers[].State.Code
+        for lb in elb.describe_load_balancers(
+                LoadBalancerArns=cfg.load_balancer_arns)["LoadBalancers"]:
+            code = lb["State"]["Code"]
+            if code in HEALTHY_LB_STATES:
+                continue
+            detail = {"state": code, "reason": lb["State"].get("Reason")}
+            target = problems if code in TRANSIENT_LB_STATES else fatal
+            target[lb["LoadBalancerArn"]] = detail
 
     for arn in cfg.target_group_arns:
         # aws elbv2 describe-target-health --target-group-arn <arn>
@@ -56,4 +86,7 @@ def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
                 "states": sorted(set(states)),
             }
 
+    if fatal:
+        raise NotRecoverableError(
+            json.dumps({"nlb": fatal}, ensure_ascii=False, default=str))
     return problems

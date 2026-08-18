@@ -2,7 +2,6 @@
 
 必要な IAM（自関数が対象とするリージョンのバケットのみ）:
     s3:GetReplicationConfiguration / s3:PutReplicationConfiguration
-    s3:ListBucket … check の head_bucket に必要
     iam:PassRole  … レプリケーション用ロール
 
 バケットは SSE-S3（AES256）で SSE-C 禁止のため KMS 権限は不要。
@@ -103,15 +102,16 @@ def enable(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
 
 @lambda_handler("s3-check", S3Config)
 def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
-    """バケットの到達性とレプリケーション Status を確認する。"""
+    """レプリケーションルールの Status を確認する.
+
+    バケットの存在確認は行わない。バケットには状態という概念が無く、
+    時間経過で失われる性質のものでもないため、切替時に確認する意味がない。
+    """
     s3 = client("s3", cfg.region)
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}
 
     for bucket in cfg.replication_buckets:
-        # aws s3api head-bucket --bucket <b>（アクセス不可なら例外を素通しさせる）
-        s3.head_bucket(Bucket=bucket)
-
         # aws s3api get-bucket-replication --bucket <b>
         #   の ReplicationConfiguration.Rules[].Status
         try:

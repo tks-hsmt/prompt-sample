@@ -268,10 +268,10 @@ resource "aws_lambda_function" "nlb_check" {
 | dr-scheduler-enable | 同上 | **自リージョン**の自チームグループのみ／スケジュール実行ロール |
 | dr-s3-block | `s3:GetReplicationConfiguration` `PutReplicationConfiguration` `iam:PassRole` | **閉塞対象**のバケット／レプリケーションロール |
 | dr-s3-enable | 同上 | **自リージョン**のバケット／レプリケーションロール |
-| dr-s3-check | `s3:ListBucket` `s3:GetReplicationConfiguration` | 自リージョンのバケット |
+| dr-s3-check | `s3:GetReplicationConfiguration` | 自リージョンのバケット |
 | dr-lambda-check | `lambda:GetFunctionConfiguration` | 自リージョンの対象関数 |
 | dr-dynamodb-check | `dynamodb:DescribeTable` | 自リージョンの対象テーブル |
-| dr-nlb-check | `elasticloadbalancing:DescribeTargetHealth` | `*` |
+| dr-nlb-check | `elasticloadbalancing:DescribeLoadBalancers` `DescribeTargetHealth` | `*` |
 | dr-cloudwatch-check | `cloudwatch:DescribeAlarms` | `*` |
 | dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 
@@ -323,8 +323,9 @@ module "dr_apigw_enable" {         # 東京を開放する
 module "dr_nlb_check" {            # 東京を確認する
   image_config_command = ["dr_switch.nlb.handlers.check"]
   environment = {
-    REGION            = "ap-northeast-1"
-    TARGET_GROUP_ARNS = jsonencode(var.target_group_arns)
+    REGION             = "ap-northeast-1"
+    TARGET_GROUP_ARNS  = jsonencode(var.target_group_arns)
+    LOAD_BALANCER_ARNS = jsonencode(var.load_balancer_arns)
   }
 }
 ```
@@ -589,6 +590,22 @@ State だけを渡す API は存在しない。`UpdateSchedule` は必須パラ�
 冪等判定は `list_schedules` の戻り値に含まれる `State` で行うため、
 変更不要なものに `get_schedule` は発行しない。
 
+## NLB の確認内容
+
+| 対象 | API | 判定 |
+|---|---|---|
+| ロードバランサ自体 | `describe_load_balancers` の `State.Code` | `active` が正常 |
+| 登録済みターゲット | `describe_target_health` の `TargetHealth.State` | unhealthy 系 0 かつ 遷移中 0 かつ healthy >= 1 |
+
+`State.Code` の意味は公式に記載がある。初期状態が `provisioning`、
+セットアップ完了で `active`、ルーティングはできるがスケールに必要なリソースが
+不足していると `active_impaired`、セットアップに失敗すると `failed`。
+
+`active_impaired` はトラフィックを流せるが不安定なので待てば直る側、
+`failed` は `NotRecoverableError` に振り分ける。
+
+`LOAD_BALANCER_ARNS` が未設定なら、ロードバランサ自体の確認はスキップする。
+
 ## NLB の構成と判定の意味
 
 NLB とターゲットグループは AWS Load Balancer Controller が Service から作成。
@@ -612,6 +629,41 @@ Controller は Endpoints / EndpointSlices からターゲットを解決し、�
 
 Hybrid Node の Ready 状態や Pending 状態の Pod はターゲットグループに
 現れないため、`dr-check-workload` との併用が前提。
+
+## 存在確認は行わない
+
+**確認対象は「時間経過で失われうる状態」に限る。** リソースが存在するかどうかは
+切替時に確認しない。存在しないなら Terraform の適用漏れであり、切替時に気づいても
+その場では直せない。
+
+そのうえで、`GetQueueAttributes` や `HeadBucket` のような呼び出しが成功しても、
+それは**コントロールプレーンが応答したことしか示さない**。AWS は
+コントロールプレーンとデータプレーンを明確に分けており、「プロビジョニング済みの
+リソースへのデータプレーンアクセスはコントロールプレーンに依存しない」と
+明記している。つまり存在確認が通ってもメッセージ送受信やオブジェクト読み書きが
+できる保証にはならず、逆にコントロールプレーン障害で通らなくても
+データプレーンは動いている可能性がある。
+
+Well-Architected は「**復旧時にはコントロールプレーンではなくデータプレーンに
+依存せよ**」をリスクレベル「高」で示している。
+
+### SQS を確認対象から外す理由
+
+**SQS の API には状態を表す属性が存在しない。** `GetQueueAttributes` が返す
+22 の属性はいずれも設定値と概算メッセージ数で、キューの健全性を示すものが無い
+（API モデルで確認済み。状態を表すシェイプも存在しない）。確認する対象そのものが
+無いため、ハンドラを用意しない。
+
+滞留件数（`ApproximateNumberOfMessages`）も見ない。DLQ の滞留は過去の処理失敗の
+痕跡で、切替先でサービスを開始できるかとは別。切替後に CloudWatch メトリクスで
+追跡する。
+
+### S3 のバケット存在確認を行わない理由
+
+バケットには状態という概念が無く、時間経過で失われる性質のものでもない。
+`s3` の check はレプリケーションルールの `Status` だけを見る。これは
+「案 A で自分が変更した設定が反映されたか」の確認であり、`apigateway` が
+スロットリング値を見ているのと同じ性質。
 
 ## EKS ワークロードの判定
 
