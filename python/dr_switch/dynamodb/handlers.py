@@ -20,15 +20,10 @@ from dr_switch.dynamodb.config import DynamoDbConfig
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.literals import TableStatusType
 
-# TableStatus の分類。取り得る値は boto3-stubs の TableStatusType（Literal）に
-# 対応し、テストで網羅性を検証している。
-# ARCHIVING は遷移中だが行き先が ARCHIVED（利用不可）なので停止側。
-HEALTHY_STATUSES: frozenset[TableStatusType] = frozenset({"ACTIVE"})
+# 待てば ACTIVE になる状態。これ以外は待っても解消しないものとして扱う
+#（ARCHIVING は遷移中だが行き先が ARCHIVED なので含めない）。
+HEALTHY_STATUS: TableStatusType = "ACTIVE"
 TRANSIENT_STATUSES: frozenset[TableStatusType] = frozenset({"CREATING", "UPDATING"})
-FATAL_STATUSES: frozenset[TableStatusType] = frozenset({
-    "DELETING", "ARCHIVING", "ARCHIVED",
-    "INACCESSIBLE_ENCRYPTION_CREDENTIALS", "REPLICATION_NOT_AUTHORIZED",
-})
 
 
 @lambda_handler("dynamodb-check", DynamoDbConfig)
@@ -40,10 +35,8 @@ def check(cfg: DynamoDbConfig, event: dict, *, dry_run: bool, context) -> dict:
 
     for name in cfg.table_names:
         status = ddb.describe_table(TableName=name)["Table"]["TableStatus"]
-        if status in HEALTHY_STATUSES:
+        if status == HEALTHY_STATUS:
             continue
-        # DELETING / ARCHIVED / INACCESSIBLE_ENCRYPTION_CREDENTIALS は
-        # 待っても ACTIVE にならない
         target = problems if status in TRANSIENT_STATUSES else fatal
         target[name] = {"status": status}
 

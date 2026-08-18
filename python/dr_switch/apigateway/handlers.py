@@ -45,8 +45,7 @@ BURST_PATH = f"/{ALL_METHODS}/throttling/burstLimit"
 BLOCKED_RATE = 0.0
 BLOCKED_BURST = 0
 
-# apiStatus の分類。取り得る値は boto3-stubs の ApiStatusType（Literal）に
-# 対応し、テストで網羅性を検証している。
+# apiStatus の分類。正常でも遷移中でもない値は、待っても解消しないものとして扱う。
 #
 # UPDATING を正常扱いにするのは、公式に「ステータスメッセージが UPDATING の
 # ときも呼び出しは可能」と明記があるため。PENDING / FAILED の意味は公式に
@@ -57,7 +56,6 @@ BLOCKED_BURST = 0
 # boto3 を 1.41.0 以上に固定している。取得できない場合は確認をスキップする。
 HEALTHY_API_STATUSES: frozenset[ApiStatusType] = frozenset({"AVAILABLE", "UPDATING"})
 TRANSIENT_API_STATUSES: frozenset[ApiStatusType] = frozenset({"PENDING"})
-FATAL_API_STATUSES: frozenset[ApiStatusType] = frozenset({"FAILED"})
 
 
 def _current_throttle(stage: dict) -> tuple[float | None, int | None]:

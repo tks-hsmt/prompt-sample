@@ -23,24 +23,15 @@ from dr_switch.lambda_function.config import LambdaConfig
 if TYPE_CHECKING:
     from mypy_boto3_lambda.literals import LastUpdateStatusType, StateType
 
-# State の分類。取り得る値は boto3-stubs の StateType（Literal）に対応し、
-# テストで網羅性を検証している。
+# 待てば Active になる状態。これ以外は待っても解消しないものとして扱う。
 #
 # Inactive は公式に「呼び出すことで再アクティブ化できる」とあるが、状態を
-# 見るだけでは何も起きず、切替の確認フェーズでは誰も呼び出さないため、
-# 待っても解消しない側に分類する。
-# Deactivating / Deactivated / ActiveNonInvocable / Deleting の意味は公式に
-# 記載が無く、いずれも呼び出せる状態ではないため停止側に分類する。
-HEALTHY_STATES: frozenset[StateType] = frozenset({"Active"})
+# 見るだけでは何も起きず、確認フェーズでは誰も呼び出さないため含めない。
+HEALTHY_STATE: StateType = "Active"
 TRANSIENT_STATES: frozenset[StateType] = frozenset({"Pending"})
-FATAL_STATES: frozenset[StateType] = frozenset({
-    "Inactive", "Failed", "Deactivating", "Deactivated",
-    "ActiveNonInvocable", "Deleting",
-})
 
-HEALTHY_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"Successful"})
+HEALTHY_UPDATE_STATUS: LastUpdateStatusType = "Successful"
 TRANSIENT_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"InProgress"})
-FATAL_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"Failed"})
 
 
 @lambda_handler("lambda-check", LambdaConfig)
@@ -59,10 +50,10 @@ def check(cfg: LambdaConfig, event: dict, *, dry_run: bool, context) -> dict:
         update = conf.get("LastUpdateStatus")
 
         issue = {}
-        if state != "Active":
+        if state != HEALTHY_STATE:
             issue["state"] = state
             issue["state_reason"] = conf.get("StateReason")
-        if update not in HEALTHY_UPDATE_STATUSES:
+        if update != HEALTHY_UPDATE_STATUS:
             issue["last_update_status"] = update
             issue["last_update_status_reason"] = conf.get("LastUpdateStatusReason")
         if not issue:
