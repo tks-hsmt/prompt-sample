@@ -144,7 +144,7 @@ dr_switch/
   cloudwatch/
     config.py  handlers.py    # check
   eks/
-    config.py  handlers.py    # restart_pods / check
+    config.py  handlers.py    # restart_pods / rollout_restart / check
   efs/
     config.py  handlers.py    # check
 tests/
@@ -181,6 +181,7 @@ Dockerfile
 | dr-nlb-check | `dr_switch.nlb.handlers.check` | 観測 | 自リージョン |
 | dr-cloudwatch-check | `dr_switch.cloudwatch.handlers.check` | 観測 | 自リージョン |
 | dr-eks-restart-pods | `dr_switch.eks.handlers.restart_pods` | 変更 | 自リージョン |
+| dr-eks-rollout-restart | `dr_switch.eks.handlers.rollout_restart` | 変更 | 自リージョン |
 | dr-eks-check | `dr_switch.eks.handlers.check` | 観測 | 自リージョン |
 | dr-efs-check | `dr_switch.efs.handlers.check` | 観測 | 自リージョン |
 
@@ -238,7 +239,7 @@ def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
-16 本で同一イメージを共有し、ハンドラだけ変える。
+17 本で同一イメージを共有し、ハンドラだけ変える。
 
 ```hcl
 resource "aws_lambda_function" "nlb_check" {
@@ -280,6 +281,7 @@ resource "aws_lambda_function" "nlb_check" {
 | dr-nlb-check | `elasticloadbalancing:DescribeLoadBalancers` `DescribeTargetHealth` | `*` |
 | dr-cloudwatch-check | `cloudwatch:DescribeAlarms` | `*` |
 | dr-eks-restart-pods | `lambda:InvokeFunction` | 自リージョンの Pod 再起動関数 |
+| dr-eks-rollout-restart | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 | dr-eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | 自リージョンのクラスタ／`*` |
 | dr-efs-check | `elasticfilesystem:DescribeFileSystems` `DescribeMountTargets` | 自リージョンのファイルシステム |
 
@@ -695,6 +697,44 @@ Timeout に合わせる**。この関数自体の Lambda タイムアウトも�
 Ready になったかは `eks` の check（`readyReplicas >= spec.replicas`）で
 確認する。フェーズ順序は restart_pods を先、check を後にする。
 
+## Pod 再起動の 2 方式
+
+用途に応じて選ぶ。**どちらか一方だけをデプロイする**想定。
+
+| | `restart_pods` | `rollout_restart` |
+|---|---|---|
+| 手段 | 既存の Pod 再起動 Lambda を `Invoke` | Kubernetes API を直接 patch |
+| 対象の指定 | 呼ばれる側が保持 | `restart_targets` に `kind` と `name` で明示 |
+| 完了待ち | **待つ**（呼ばれる側の実装） | 待たない |
+| 所要時間 | 呼ばれる側次第（並列化して短縮） | patch のみで即完了 |
+| 必要な権限 | `lambda:InvokeFunction` | Kubernetes RBAC の `patch` |
+
+### rollout_restart の中身
+
+`kubectl rollout restart deployment -n <ns>` 相当。kubectl はテンプレートの
+annotations に `kubectl.kubernetes.io/restartedAt` を書き込むだけで、実際の
+Pod 入れ替えはコントローラが行う。ここでも同じ patch を送る。
+
+```python
+{"spec": {"template": {"metadata": {"annotations": {
+    "kubectl.kubernetes.io/restartedAt": "<RFC3339>"}}}}}
+```
+
+**完了は待たない。** 収束は check（`readyReplicas >= spec.replicas`）が確認する。
+待機を Lambda ではなく Step Functions の `Retry` に任せるので、実行履歴に
+待機が残り、Lambda のタイムアウトにも縛られない。
+
+対象は `NamespaceConfig.restart_targets` に `kind` と `name` で明示する。
+空なら何もしない（その namespace は check の対象にはなる）。対象が 1 つも
+無いクラスタは kubeconfig の生成もスキップする。
+
+`kind` に指定できるのは `Deployment` と `DaemonSet`。**DaemonSet は Hybrid Node
+上で vLB からの受信を担うため、再起動すると切替中の取りこぼしにつながりうる。**
+含めるかは要判断。
+
+`check` は Kubernetes RBAC の `list` で足りるが、`rollout_restart` は
+`deployments` / `daemonsets` への **`patch` が必要**。
+
 ## EFS の確認内容
 
 EKS の Pod が EFS CSI ドライバ経由で利用する。
@@ -770,10 +810,31 @@ Deployment / DaemonSet / CronJob の 3 種。
 
 ```hcl
 EKS_CLUSTERS = jsonencode([
-  { name = "cluster-a", namespaces = ["ns-1", "ns-2"] },
-  { name = "cluster-b", namespaces = ["ns-1", "ns-2"] },
+  {
+    name = "cluster-a"
+    namespaces = [
+      {
+        name = "ns-1"
+        # rollout restart の対象。空または未指定なら再起動しない
+        restart_targets = [
+          { kind = "Deployment", name = "app-a" },
+          { kind = "Deployment", name = "app-b" },
+        ]
+      },
+      { name = "ns-2" },
+    ]
+  },
+  {
+    name       = "cluster-b"
+    namespaces = [{ name = "ns-1" }]
+  },
 ])
 ```
+
+`namespaces` はオブジェクトの配列。`check` は `name` だけを見て namespace 配下を
+全件確認し、`rollout_restart` は `restart_targets` に列挙されたものだけを
+再起動する。**確認対象と再起動対象は範囲が違う**ため、同じ階層に別々の項目として
+持たせる。
 
 `namespaces` は必須。全チーム共通の Lambda に包含する場合も、クラスタを
 足すか namespaces に全チーム分を列挙すればよい。
@@ -810,9 +871,8 @@ Hybrid Node の Ready を直接確認する案は採らない。DaemonSet の判
 | ノードは Ready だが Pod が落ちている | 検出不可 | `ready < desired` |
 
 固有の価値はノード名が分かることだけで、切替可否の判断は変わらない。
-一方 Node はクラスタスコープのリソースなので ClusterRoleBinding が必要になり、
-クラスタが他チーム管理である以上その権限を依頼することになる。
-得るものに対してコストが見合わない。
+一方 Node はクラスタスコープのリソースなので ClusterRoleBinding が必要になる。
+得るものに対して権限の範囲が広がりすぎる。
 
 この判断により、必要な RBAC は namespaced リソースの読み取りだけになる
 （各 namespace の RoleBinding のみ。ClusterRoleBinding は不要）。

@@ -5,7 +5,14 @@ kubeconfig は AWS CLI の update-kubeconfig で生成する。CA 証明書と
 
 必要な IAM:
     eks:DescribeCluster / sts:GetCallerIdentity
-    ワークロードの参照権限は IAM ではなく Kubernetes RBAC 側
+    restart_pods のみ lambda:InvokeFunction
+    ワークロードの参照・更新権限は IAM ではなく Kubernetes RBAC 側
+    （check は list、rollout_restart は patch が必要）
+
+ハンドラ:
+    check            ワークロードが収束しているか確認
+    restart_pods     既存の Pod 再起動 Lambda を並列に呼び出す
+    rollout_restart  Kubernetes API を直接叩いて rollout restart する
 
 タイムアウト:
     update-kubeconfig は 15 秒、Kubernetes API 呼び出しは (connect 3, read 10) 秒。
@@ -21,6 +28,7 @@ import logging
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 
 from botocore.config import Config
 from kubernetes import client as k8s
@@ -141,14 +149,15 @@ def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
         found: dict[str, object] = {}
         apis = _build_apis(cfg, cluster)
 
-        if deployments := _deployment_problems(apis, cluster.namespaces):
+        ns_names = [ns.name for ns in cluster.namespaces]
+        if deployments := _deployment_problems(apis, ns_names):
             found["deployments"] = deployments
-        daemonsets, ds_fatal = _daemonset_problems(apis, cluster.namespaces)
+        daemonsets, ds_fatal = _daemonset_problems(apis, ns_names)
         if daemonsets:
             found["daemonsets"] = daemonsets
         if ds_fatal:
             fatal[cluster.name] = {"daemonsets": ds_fatal}
-        if pending := _pending_pods(apis, cluster.namespaces):
+        if pending := _pending_pods(apis, ns_names):
             found["pending_pods"] = pending
 
         if found:
@@ -158,6 +167,71 @@ def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
         raise NotRecoverableError(
             json.dumps({"workload": fatal}, ensure_ascii=False, default=str))
     return problems
+
+
+# kubectl rollout restart が付けるアノテーション。値を更新すると Pod テンプレート
+# のハッシュが変わり、ローリングアップデートが走る。
+RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
+
+# rollout restart に対応する種別と、対応する patch メソッド名。
+RESTART_METHODS = {
+    "Deployment": "patch_namespaced_deployment",
+    "DaemonSet": "patch_namespaced_daemon_set",
+}
+
+
+def _rollout_restart(apis: ClusterApis, cluster: ClusterConfig, *,
+                     dry_run: bool) -> None:
+    """設定された対象に kubectl rollout restart 相当を実行する.
+
+    kubectl rollout restart deployment/<name> -n <ns> に相当。
+    kubectl はテンプレートの annotations に restartedAt を書き込むだけで、
+    実際の Pod 入れ替えはコントローラが行う。ここでも同じ patch を送る。
+
+    完了は待たない。収束は check（readyReplicas >= spec.replicas）が
+    確認する。待機を Lambda ではなく Step Functions の Retry に任せる。
+    """
+    now = datetime.now(UTC).isoformat()
+    body = {"spec": {"template": {"metadata": {
+        "annotations": {RESTART_ANNOTATION: now}}}}}
+
+    for ns in cluster.namespaces:
+        for target in ns.restart_targets:
+            method = RESTART_METHODS.get(target.kind)
+            if method is None:
+                raise NotRecoverableError(
+                    f"unsupported restart kind: {target.kind} "
+                    f"(supported: {sorted(RESTART_METHODS)})")
+
+            label = f"{cluster.name}/{ns.name}/{target.kind}/{target.name}"
+            if dry_run:
+                logger.info("would rollout restart: %s", label)
+                continue
+            getattr(apis.apps, method)(
+                target.name, ns.name, body, _request_timeout=K8S_TIMEOUT)
+            logger.info("rollout restart: %s", label)
+
+
+@lambda_handler("eks-rollout-restart", EksConfig)
+def rollout_restart(cfg: EksConfig, event: dict, *, dry_run: bool,
+                    context) -> dict:
+    """設定された対象を rollout restart する.
+
+    既存の Pod 再起動 Lambda を呼ぶ restart_pods とは別系統。こちらは
+    Kubernetes API を直接叩くため、呼び出し先の実装に依存しない。
+
+    対象は NamespaceConfig.restart_targets で指定する。空なら何もしない
+    （その namespace は check の対象にはなる）。
+
+    必要な Kubernetes RBAC は deployments / daemonsets への patch。
+    check 用の list だけでは足りない。
+    """
+    for cluster in cfg.clusters:
+        if not any(ns.restart_targets for ns in cluster.namespaces):
+            continue
+        apis = _build_apis(cfg, cluster)
+        _rollout_restart(apis, cluster, dry_run=dry_run)
+    return {}
 
 
 def _invoke_config(timeout: int) -> Config:
