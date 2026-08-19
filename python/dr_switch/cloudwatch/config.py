@@ -9,7 +9,9 @@ from dr_switch.core import BaseConfig, optional, required
 
 
 @dataclass(frozen=True)
-class AlarmConfig(BaseConfig):
+class AlarmBaseConfig(BaseConfig):
+    """全ハンドラ共通。確認対象のリソース。"""
+
     alarm_prefix: str = ""
 
     @classmethod
@@ -18,3 +20,8 @@ class AlarmConfig(BaseConfig):
             region=required("REGION"),
             alarm_prefix=optional("ALARM_PREFIX", ""),
         )
+
+
+@dataclass(frozen=True)
+class AlarmCheckConfig(AlarmBaseConfig):
+    """check 用。追加の項目は無い。"""

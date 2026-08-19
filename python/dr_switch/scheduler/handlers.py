@@ -24,7 +24,12 @@ from dr_switch.core import (
     lambda_handler,
     run_per_item,
 )
-from dr_switch.scheduler.config import SchedulerConfig
+from dr_switch.scheduler.config import (
+    SchedulerBaseConfig,
+    SchedulerBlockConfig,
+    SchedulerCheckConfig,
+    SchedulerEnableConfig,
+)
 
 if TYPE_CHECKING:
     from mypy_boto3_scheduler.literals import (
@@ -48,7 +53,8 @@ SCHEDULE_READONLY_KEYS = frozenset({
 })
 
 
-def _set_state(scheduler, cfg: SchedulerConfig, name: str, state: str) -> dict:
+def _set_state(scheduler, cfg: SchedulerBaseConfig, name: str,
+               state: str) -> dict:
     """1 件のスケジュールの State を変更する.
 
     UpdateSchedule は渡した内容で丸ごと置き換える（未指定は null になる）。
@@ -63,7 +69,7 @@ def _set_state(scheduler, cfg: SchedulerConfig, name: str, state: str) -> dict:
     return {"state": state}
 
 
-def _set_schedules(cfg: SchedulerConfig, *, enabled: bool, dry_run: bool,
+def _set_schedules(cfg: SchedulerBaseConfig, *, enabled: bool, dry_run: bool,
                    best_effort: bool) -> None:
     scheduler = client("scheduler", cfg.region)
     want = STATE_ENABLED if enabled else STATE_DISABLED
@@ -88,22 +94,25 @@ def _set_schedules(cfg: SchedulerConfig, *, enabled: bool, dry_run: bool,
                 cfg.region, cfg.schedule_group, len(targets), len(skipped))
 
 
-@lambda_handler("scheduler-block", SchedulerConfig, best_effort=True)
-def block(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("scheduler-block", SchedulerBlockConfig, best_effort=True)
+def block(cfg: SchedulerBlockConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     """スケジュールを停止する。"""
     _set_schedules(cfg, enabled=False, dry_run=dry_run, best_effort=True)
     return {}
 
 
-@lambda_handler("scheduler-enable", SchedulerConfig)
-def enable(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("scheduler-enable", SchedulerEnableConfig)
+def enable(cfg: SchedulerEnableConfig, event: dict, *, dry_run: bool,
+           context) -> dict:
     """スケジュールを開始する。"""
     _set_schedules(cfg, enabled=True, dry_run=dry_run, best_effort=False)
     return {}
 
 
-@lambda_handler("scheduler-check", SchedulerConfig)
-def check(cfg: SchedulerConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("scheduler-check", SchedulerCheckConfig)
+def check(cfg: SchedulerCheckConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     """グループが利用できる状態か、スケジュールが開始されているかを確認する。"""
     scheduler = client("scheduler", cfg.region)
 

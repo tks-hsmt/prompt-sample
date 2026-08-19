@@ -49,15 +49,10 @@ class ClusterConfig:
 
 
 @dataclass(frozen=True)
-class EksConfig(BaseConfig):
+class EksBaseConfig(BaseConfig):
+    """Kubernetes API を叩くハンドラ共通。"""
+
     clusters: list[ClusterConfig] = field(default_factory=list)
-    #: Pod を再起動する既存 Lambda の名前または ARN。
-    #: 対象クラスタ・namespace・Pod は呼ばれる側が保持している。
-    #: 順序依存が無いため並列に呼び出す。
-    pod_restart_functions: list[str] = field(default_factory=list)
-    #: 呼ばれる側は Pod の起動完了を待つため、既定より長い読み取り
-    #: タイムアウトが要る。呼ばれる側の Timeout に合わせて設定する。
-    pod_restart_timeout: int = 300
 
     @classmethod
     def from_env(cls) -> Self:
@@ -65,6 +60,42 @@ class EksConfig(BaseConfig):
         return cls(
             region=required("REGION"),
             clusters=[ClusterConfig.from_dict(c) for c in raw],
-            pod_restart_functions=optional_json("POD_RESTART_FUNCTIONS", []),
-            pod_restart_timeout=int(optional("POD_RESTART_TIMEOUT", "300")),
         )
+
+
+@dataclass(frozen=True)
+class EksRolloutRestartConfig(EksBaseConfig):
+    """rollout_restart 用。対象は clusters の restart_targets で指定する。"""
+
+
+@dataclass(frozen=True)
+class EksCheckConfig(EksBaseConfig):
+    """check 用。追加の項目は無い。"""
+
+
+@dataclass(frozen=True)
+class PodRestartBaseConfig(BaseConfig):
+    """既存の Pod 再起動 Lambda を呼び出すハンドラ共通.
+
+    EKS のリソースではなく呼び出す関数を指すので、EksBaseConfig とは別の概念。
+    対象クラスタ・namespace・Pod は呼ばれる側が保持している。
+    """
+
+    #: 呼び出す関数の名前または ARN。順序依存が無いため並列に呼ぶ。
+    functions: list[str] = field(default_factory=list)
+    #: 呼ばれる側は Pod の起動完了を待つため、既定より長い読み取り
+    #: タイムアウトが要る。呼ばれる側の Timeout に合わせて設定する。
+    timeout: int = 300
+
+    @classmethod
+    def from_env(cls) -> Self:
+        return cls(
+            region=required("REGION"),
+            functions=optional_json("POD_RESTART_FUNCTIONS", []),
+            timeout=int(optional("POD_RESTART_TIMEOUT", "300")),
+        )
+
+
+@dataclass(frozen=True)
+class PodRestartConfig(PodRestartBaseConfig):
+    """restart_pods 用。追加の項目は無い。"""

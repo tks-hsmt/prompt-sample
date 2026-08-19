@@ -9,7 +9,9 @@ from dr_switch.core import BaseConfig, optional_json, required
 
 
 @dataclass(frozen=True)
-class LambdaConfig(BaseConfig):
+class LambdaBaseConfig(BaseConfig):
+    """全ハンドラ共通。確認対象のリソース。"""
+
     function_names: list[str] = field(default_factory=list)
 
     @classmethod
@@ -18,3 +20,8 @@ class LambdaConfig(BaseConfig):
             region=required("REGION"),
             function_names=optional_json("FUNCTION_NAMES", []),
         )
+
+
+@dataclass(frozen=True)
+class LambdaCheckConfig(LambdaBaseConfig):
+    """check 用。追加の項目は無い。"""

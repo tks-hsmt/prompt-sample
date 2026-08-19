@@ -27,7 +27,7 @@ import json
 from typing import TYPE_CHECKING
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
-from dr_switch.efs.config import EfsConfig
+from dr_switch.efs.config import EfsCheckConfig
 
 if TYPE_CHECKING:
     from mypy_boto3_efs.literals import LifeCycleStateType
@@ -38,8 +38,8 @@ HEALTHY_STATE: LifeCycleStateType = "available"
 TRANSIENT_STATES: frozenset[LifeCycleStateType] = frozenset({"creating", "updating"})
 
 
-@lambda_handler("efs-check", EfsConfig)
-def check(cfg: EfsConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("efs-check", EfsCheckConfig)
+def check(cfg: EfsCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     efs = client("efs", cfg.region)
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}

@@ -35,7 +35,13 @@ from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
-from dr_switch.eks.config import ClusterConfig, EksConfig
+from dr_switch.eks.config import (
+    ClusterConfig,
+    EksBaseConfig,
+    EksCheckConfig,
+    EksRolloutRestartConfig,
+    PodRestartConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +61,7 @@ class ClusterApis:
         self.core = core
 
 
-def _build_apis(cfg: EksConfig, cluster: ClusterConfig) -> ClusterApis:
+def _build_apis(cfg: EksBaseConfig, cluster: ClusterConfig) -> ClusterApis:
     # Lambda で書けるのは /tmp のみ。ベースイメージ側の値を無条件に上書きする。
     os.environ["HOME"] = KUBECONFIG_DIR
     path = f"{KUBECONFIG_DIR}/kubeconfig-{cluster.name}"
@@ -140,8 +146,8 @@ def _pending_pods(apis: ClusterApis, namespaces: list[str]) -> list[str]:
     return pending
 
 
-@lambda_handler("eks-check", EksConfig)
-def check(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("eks-check", EksCheckConfig)
+def check(cfg: EksCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}
 
@@ -212,9 +218,9 @@ def _rollout_restart(apis: ClusterApis, cluster: ClusterConfig, *,
             logger.info("rollout restart: %s", label)
 
 
-@lambda_handler("eks-rollout-restart", EksConfig)
-def rollout_restart(cfg: EksConfig, event: dict, *, dry_run: bool,
-                    context) -> dict:
+@lambda_handler("eks-rollout-restart", EksRolloutRestartConfig)
+def rollout_restart(cfg: EksRolloutRestartConfig, event: dict, *,
+                    dry_run: bool, context) -> dict:
     """設定された対象を rollout restart する.
 
     既存の Pod 再起動 Lambda を呼ぶ restart_pods とは別系統。こちらは
@@ -275,8 +281,9 @@ def _invoke_restart(lam, name: str, *, dry_run: bool) -> None:
                 name, response.get("StatusCode"))
 
 
-@lambda_handler("eks-restart-pods", EksConfig)
-def restart_pods(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("eks-restart-pods", PodRestartConfig)
+def restart_pods(cfg: PodRestartConfig, event: dict, *, dry_run: bool,
+                 context) -> dict:
     """既存の Pod 再起動 Lambda を並列に呼び出す.
 
     対象クラスタ・namespace・Pod は呼ばれる側が保持しているため、こちらは
@@ -287,8 +294,8 @@ def restart_pods(cfg: EksConfig, event: dict, *, dry_run: bool, context) -> dict
     ので、中断はできない。失敗が 1 件でもあれば NotRecoverableError を
     送出し、どの関数が失敗したかをすべて載せる。
     """
-    lam = client("lambda", cfg.region, _invoke_config(cfg.pod_restart_timeout))
-    names = cfg.pod_restart_functions
+    lam = client("lambda", cfg.region, _invoke_config(cfg.timeout))
+    names = cfg.functions
     if not names:
         return {}
 

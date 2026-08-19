@@ -18,7 +18,7 @@ import json
 from typing import TYPE_CHECKING
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
-from dr_switch.lambda_function.config import LambdaConfig
+from dr_switch.lambda_function.config import LambdaCheckConfig
 
 if TYPE_CHECKING:
     from mypy_boto3_lambda.literals import LastUpdateStatusType, StateType
@@ -34,8 +34,9 @@ HEALTHY_UPDATE_STATUS: LastUpdateStatusType = "Successful"
 TRANSIENT_UPDATE_STATUSES: frozenset[LastUpdateStatusType] = frozenset({"InProgress"})
 
 
-@lambda_handler("lambda-check", LambdaConfig)
-def check(cfg: LambdaConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("lambda-check", LambdaCheckConfig)
+def check(cfg: LambdaCheckConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     lam = client("lambda", cfg.region)
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}

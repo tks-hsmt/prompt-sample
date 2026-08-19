@@ -28,7 +28,12 @@ from dr_switch.core import (
     lambda_handler,
     run_per_item,
 )
-from dr_switch.s3.config import S3Config
+from dr_switch.s3.config import (
+    S3BaseConfig,
+    S3BlockConfig,
+    S3CheckConfig,
+    S3EnableConfig,
+)
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.literals import ReplicationRuleStatusType
@@ -40,7 +45,7 @@ RULE_ENABLED: ReplicationRuleStatusType = "Enabled"
 RULE_DISABLED: ReplicationRuleStatusType = "Disabled"
 
 
-def _set_replication(cfg: S3Config, bucket: str, *,
+def _set_replication(cfg: S3BaseConfig, bucket: str, *,
                      enabled: bool, dry_run: bool) -> dict:
     # run_per_item が結果を集約するため dict を返す（ハンドラの戻り値ではない）
     """レプリケーションルールの Status を一括で切り替える.
@@ -72,7 +77,7 @@ def _set_replication(cfg: S3Config, bucket: str, *,
             "rules": {rule["ID"]: want for rule in configuration["Rules"]}}
 
 
-def _apply(cfg: S3Config, *, enabled: bool, dry_run: bool,
+def _apply(cfg: S3BaseConfig, *, enabled: bool, dry_run: bool,
            best_effort: bool) -> None:
     run_per_item(
         cfg.replication_buckets,
@@ -82,15 +87,15 @@ def _apply(cfg: S3Config, *, enabled: bool, dry_run: bool,
     )
 
 
-@lambda_handler("s3-replication-block", S3Config, best_effort=True)
-def block(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("s3-replication-block", S3BlockConfig, best_effort=True)
+def block(cfg: S3BlockConfig, event: dict, *, dry_run: bool, context) -> dict:
     """レプリケーションを停止する。"""
     _apply(cfg, enabled=False, dry_run=dry_run, best_effort=True)
     return {}
 
 
-@lambda_handler("s3-replication-enable", S3Config)
-def enable(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("s3-replication-enable", S3EnableConfig)
+def enable(cfg: S3EnableConfig, event: dict, *, dry_run: bool, context) -> dict:
     """逆方向レプリケーションを開始する.
 
     トラフィックを受け始める前に実行すること。ライブレプリケーションの
@@ -100,8 +105,8 @@ def enable(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
     return {}
 
 
-@lambda_handler("s3-check", S3Config)
-def check(cfg: S3Config, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("s3-check", S3CheckConfig)
+def check(cfg: S3CheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     """レプリケーションルールの Status を確認する.
 
     バケットの存在確認は行わない。バケットには状態という概念が無く、

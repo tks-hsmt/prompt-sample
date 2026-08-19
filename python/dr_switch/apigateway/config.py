@@ -1,23 +1,23 @@
-"""API Gateway 用の設定."""
+"""API Gateway 用の設定.
+
+リソースごとに Base を置き、ハンドラごとにサブクラスを作る。追加項目が
+無いハンドラでも空のサブクラスを定義し、全リソースで構造を揃える。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Self
 
-from dr_switch.core import BaseConfig, optional, required
-
-DEFAULT_THROTTLE_RATE = "10000"
-DEFAULT_THROTTLE_BURST = "5000"
+from dr_switch.core import BaseConfig, required
 
 
 @dataclass(frozen=True)
-class ApiGatewayConfig(BaseConfig):
+class ApiGatewayBaseConfig(BaseConfig):
+    """全ハンドラ共通。操作対象のステージ。"""
+
     rest_api_id: str
     stage: str
-    throttle_rate: float = float(DEFAULT_THROTTLE_RATE)
-    throttle_burst: int = int(DEFAULT_THROTTLE_BURST)
-    health_url: str | None = None
 
     @classmethod
     def from_env(cls) -> Self:
@@ -25,7 +25,32 @@ class ApiGatewayConfig(BaseConfig):
             region=required("REGION"),
             rest_api_id=required("REST_API_ID"),
             stage=required("STAGE"),
-            throttle_rate=float(optional("THROTTLE_RATE", DEFAULT_THROTTLE_RATE)),
-            throttle_burst=int(optional("THROTTLE_BURST", DEFAULT_THROTTLE_BURST)),
-            health_url=optional("HEALTH_URL"),
         )
+
+
+@dataclass(frozen=True)
+class ApiGatewayBlockConfig(ApiGatewayBaseConfig):
+    """block 用。閉塞は定数 0 を使うので追加の項目は無い。"""
+
+
+@dataclass(frozen=True)
+class ApiGatewayEnableConfig(ApiGatewayBaseConfig):
+    """enable 用。開放後のスロットリング値。"""
+
+    throttle_rate: float
+    throttle_burst: int
+
+    @classmethod
+    def from_env(cls) -> Self:
+        return cls(
+            region=required("REGION"),
+            rest_api_id=required("REST_API_ID"),
+            stage=required("STAGE"),
+            throttle_rate=float(required("THROTTLE_RATE")),
+            throttle_burst=int(required("THROTTLE_BURST")),
+        )
+
+
+@dataclass(frozen=True)
+class ApiGatewayCheckConfig(ApiGatewayEnableConfig):
+    """check 用。enable が設定した値と一致するかを確認する。"""

@@ -9,7 +9,9 @@ from dr_switch.core import BaseConfig, optional_json, required
 
 
 @dataclass(frozen=True)
-class S3Config(BaseConfig):
+class S3BaseConfig(BaseConfig):
+    """全ハンドラ共通。操作対象のバケット。"""
+
     replication_buckets: list[str] = field(default_factory=list)
 
     @classmethod
@@ -18,3 +20,18 @@ class S3Config(BaseConfig):
             region=required("REGION"),
             replication_buckets=optional_json("REPLICATION_BUCKETS", []),
         )
+
+
+@dataclass(frozen=True)
+class S3BlockConfig(S3BaseConfig):
+    """block 用。Status を定数で指定するので追加の項目は無い。"""
+
+
+@dataclass(frozen=True)
+class S3EnableConfig(S3BaseConfig):
+    """enable 用。追加の項目は無い。"""
+
+
+@dataclass(frozen=True)
+class S3CheckConfig(S3BaseConfig):
+    """check 用。追加の項目は無い。"""

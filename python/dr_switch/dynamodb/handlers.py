@@ -15,7 +15,7 @@ import json
 from typing import TYPE_CHECKING
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
-from dr_switch.dynamodb.config import DynamoDbConfig
+from dr_switch.dynamodb.config import DynamoDbCheckConfig
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.literals import TableStatusType
@@ -26,8 +26,9 @@ HEALTHY_STATUS: TableStatusType = "ACTIVE"
 TRANSIENT_STATUSES: frozenset[TableStatusType] = frozenset({"CREATING", "UPDATING"})
 
 
-@lambda_handler("dynamodb-check", DynamoDbConfig)
-def check(cfg: DynamoDbConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("dynamodb-check", DynamoDbCheckConfig)
+def check(cfg: DynamoDbCheckConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     # aws dynamodb describe-table --table-name <n> の Table.TableStatus
     ddb = client("dynamodb", cfg.region)
     problems: dict[str, dict] = {}

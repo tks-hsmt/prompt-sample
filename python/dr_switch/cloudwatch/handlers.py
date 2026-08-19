@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from dr_switch.cloudwatch.config import AlarmConfig
+from dr_switch.cloudwatch.config import AlarmCheckConfig
 from dr_switch.core import client, lambda_handler
 
 if TYPE_CHECKING:
@@ -25,8 +25,9 @@ if TYPE_CHECKING:
 ALARM_STATE: StateValueType = "ALARM"
 
 
-@lambda_handler("cloudwatch-check", AlarmConfig)
-def check(cfg: AlarmConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("cloudwatch-check", AlarmCheckConfig)
+def check(cfg: AlarmCheckConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     # aws cloudwatch describe-alarms --state-value ALARM --alarm-name-prefix <p>
     #   の MetricAlarms[].AlarmName
     cw = client("cloudwatch", cfg.region)

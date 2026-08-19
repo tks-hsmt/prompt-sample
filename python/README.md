@@ -74,8 +74,8 @@ AWS 例外の `try/except` は `lambda_handler` の中だけに置き、個々�
 AWS 例外の分類を担う。各ハンドラは自分の処理だけを書く。
 
 ```python
-@lambda_handler("nlb-check", NlbConfig)
-def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("nlb-check", NlbCheckConfig)
+def check(cfg: NlbCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     return problems   # 問題のある項目だけを返す。正常なら {}
 
 
@@ -191,6 +191,51 @@ Dockerfile
 （`apigateway.enable` だけ任意で `throttle` を受ける）。どちらのリージョンを
 対象にするかは環境変数で決まる。
 
+### 設定クラスの単位
+
+**リソースごとに Base を置き、ハンドラごとにサブクラスを作る。** 追加項目が
+無いハンドラでも空のサブクラスを定義し、全リソースで構造を揃える。
+
+```python
+class ApiGatewayBaseConfig(BaseConfig):     # 全ハンドラ共通
+    rest_api_id: str
+    stage: str
+
+class ApiGatewayBlockConfig(ApiGatewayBaseConfig):
+    """block 用。閉塞は定数 0 を使うので追加の項目は無い。"""
+
+class ApiGatewayEnableConfig(ApiGatewayBaseConfig):
+    throttle_rate: float
+    throttle_burst: int
+
+class ApiGatewayCheckConfig(ApiGatewayEnableConfig):
+    """check 用。enable が設定した値と一致するかを確認する。"""
+```
+
+| リソース | Base | サブクラス |
+|---|---|---|
+| apigateway | `ApiGatewayBaseConfig` | Block / Enable / Check |
+| scheduler | `SchedulerBaseConfig` | Block / Enable / Check |
+| s3 | `S3BaseConfig` | Block / Enable / Check |
+| lambda_function | `LambdaBaseConfig` | Check |
+| dynamodb | `DynamoDbBaseConfig` | Check |
+| nlb | `NlbBaseConfig` | Check |
+| cloudwatch | `AlarmBaseConfig` | Check |
+| efs | `EfsBaseConfig` | Check |
+| eks | `EksBaseConfig` | RolloutRestart / Check |
+| eks（Lambda 呼び出し） | `PodRestartBaseConfig` | PodRestart |
+
+**差分が無くてもサブクラスを作る理由は、読み手が例外を覚えなくてよいこと。**
+「なぜここだけ分かれているのか」を構造の外で説明しなければならない状態を避ける。
+将来ハンドラ固有の項目が増えたときも置き場所が既にある。
+
+`PodRestartBaseConfig` だけは別系統。EKS のリソースではなく**呼び出す Lambda
+関数**を指すので、`EksBaseConfig` とは概念が違う。
+
+分けた実利は、**必要な項目を `_required` にできる**こと。`THROTTLE_RATE` は
+`ApiGatewayEnableConfig` の必須なので、設定漏れが `from_env` で止まる。
+`block` 用の Lambda には渡す必要が無いことも構造から読み取れる。
+
 ### core のファサード
 
 `dr_switch/core/__init__.py` が公開する名前を再エクスポートする。各リソースの
@@ -228,8 +273,8 @@ AWS が明文化しているのは「ハンドラをコアロジックから分�
 
 ```python
 @inject_lambda_context
-@lambda_handler("nlb-check", NlbConfig)
-def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("nlb-check", NlbCheckConfig)
+def check(cfg: NlbCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     ...
 ```
 
@@ -341,8 +386,9 @@ module "dr_nlb_check" {            # 東京を確認する
 ```
 
 `REGION` は全関数で必須。他は使う関数にだけ渡す。設定クラスごとの必須項目は
-`REST_API_ID` / `STAGE`（ApiGatewayConfig）、`SCHEDULE_GROUP`（SchedulerConfig）、
-`EKS_CLUSTERS`（EksConfig の各要素は `name` と `namespaces` が必須）。
+`REST_API_ID` / `STAGE`（ApiGateway 系すべて）、`THROTTLE_RATE` / `THROTTLE_BURST`
+（`ApiGatewayEnableConfig` / `ApiGatewayCheckConfig` のみ）、`SCHEDULE_GROUP`
+（Scheduler 系すべて）、`EKS_CLUSTERS`（各要素は `name` と `namespaces` が必須）。
 
 ## Step Functions への組み込み
 

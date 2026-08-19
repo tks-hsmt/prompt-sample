@@ -9,7 +9,9 @@ from dr_switch.core import BaseConfig, optional_json, required
 
 
 @dataclass(frozen=True)
-class DynamoDbConfig(BaseConfig):
+class DynamoDbBaseConfig(BaseConfig):
+    """全ハンドラ共通。確認対象のリソース。"""
+
     table_names: list[str] = field(default_factory=list)
 
     @classmethod
@@ -18,3 +20,8 @@ class DynamoDbConfig(BaseConfig):
             region=required("REGION"),
             table_names=optional_json("TABLE_NAMES", []),
         )
+
+
+@dataclass(frozen=True)
+class DynamoDbCheckConfig(DynamoDbBaseConfig):
+    """check 用。追加の項目は無い。"""

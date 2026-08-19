@@ -9,7 +9,9 @@ from dr_switch.core import BaseConfig, optional_json, required
 
 
 @dataclass(frozen=True)
-class NlbConfig(BaseConfig):
+class NlbBaseConfig(BaseConfig):
+    """全ハンドラ共通。確認対象のリソース。"""
+
     target_group_arns: list[str] = field(default_factory=list)
     #: ロードバランサ自体の状態を確認する対象
     load_balancer_arns: list[str] = field(default_factory=list)
@@ -21,3 +23,8 @@ class NlbConfig(BaseConfig):
             target_group_arns=optional_json("TARGET_GROUP_ARNS", []),
             load_balancer_arns=optional_json("LOAD_BALANCER_ARNS", []),
         )
+
+
+@dataclass(frozen=True)
+class NlbCheckConfig(NlbBaseConfig):
+    """check 用。追加の項目は無い。"""

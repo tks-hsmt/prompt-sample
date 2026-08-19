@@ -28,7 +28,12 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from dr_switch.apigateway.config import ApiGatewayConfig
+from dr_switch.apigateway.config import (
+    ApiGatewayBaseConfig,
+    ApiGatewayBlockConfig,
+    ApiGatewayCheckConfig,
+    ApiGatewayEnableConfig,
+)
 from dr_switch.core import NotRecoverableError, client, lambda_handler
 
 if TYPE_CHECKING:
@@ -67,7 +72,7 @@ def _current_throttle(stage: dict) -> tuple[float | None, int | None]:
             settings.get("throttlingBurstLimit"))
 
 
-def _set_throttle(cfg: ApiGatewayConfig, *, rate: float, burst: int,
+def _set_throttle(cfg: ApiGatewayBaseConfig, *, rate: float, burst: int,
                   dry_run: bool) -> None:
     apigw = client("apigateway", cfg.region)
 
@@ -100,15 +105,17 @@ def _set_throttle(cfg: ApiGatewayConfig, *, rate: float, burst: int,
                 cfg.region, current_rate, rate, current_burst, burst)
 
 
-@lambda_handler("apigateway-block", ApiGatewayConfig, best_effort=True)
-def block(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("apigateway-block", ApiGatewayBlockConfig, best_effort=True)
+def block(cfg: ApiGatewayBlockConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     """スロットリングを 0 にして閉塞する。"""
     _set_throttle(cfg, rate=BLOCKED_RATE, burst=BLOCKED_BURST, dry_run=dry_run)
     return {}
 
 
-@lambda_handler("apigateway-enable", ApiGatewayConfig)
-def enable(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("apigateway-enable", ApiGatewayEnableConfig)
+def enable(cfg: ApiGatewayEnableConfig, event: dict, *, dry_run: bool,
+           context) -> dict:
     """スロットリングを通常値へ戻して開放する。"""
     override = event.get("throttle") or {}
     _set_throttle(
@@ -120,8 +127,9 @@ def enable(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dic
     return {}
 
 
-@lambda_handler("apigateway-check", ApiGatewayConfig)
-def check(cfg: ApiGatewayConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("apigateway-check", ApiGatewayCheckConfig)
+def check(cfg: ApiGatewayCheckConfig, event: dict, *, dry_run: bool,
+          context) -> dict:
     """API の状態と、スロットリングが開放後の値に戻っているかを確認する。"""
     apigw = client("apigateway", cfg.region)
     problems: dict[str, object] = {}

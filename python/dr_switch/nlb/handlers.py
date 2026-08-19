@@ -18,7 +18,7 @@ import json
 from typing import TYPE_CHECKING
 
 from dr_switch.core import NotRecoverableError, client, lambda_handler
-from dr_switch.nlb.config import NlbConfig
+from dr_switch.nlb.config import NlbCheckConfig
 
 if TYPE_CHECKING:
     from mypy_boto3_elbv2.literals import (
@@ -49,8 +49,8 @@ UNHEALTHY_TARGET_STATES: frozenset[TargetHealthStateEnumType] = frozenset({
 })
 
 
-@lambda_handler("nlb-check", NlbConfig)
-def check(cfg: NlbConfig, event: dict, *, dry_run: bool, context) -> dict:
+@lambda_handler("nlb-check", NlbCheckConfig)
+def check(cfg: NlbCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
     elb = client("elbv2", cfg.region)
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}
