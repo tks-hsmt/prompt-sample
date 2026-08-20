@@ -1,8 +1,12 @@
 # ============================================================================
-# DR 切替 Lambda の IAM 定義（サンプル）
+# module の入力
 #
 # 東京・大阪の両リージョンに同じ構成をデプロイする。閉塞系（block）だけが
 # 相手リージョンのリソースを操作するため、そこだけ peer_* の値を使う。
+#
+# 対象リソースの ID は呼び出し側から注入する。同一 state でリソースを管理して
+# いるなら、リソース参照をそのまま渡すこと
+# （例: self_rest_api_id = aws_api_gateway_rest_api.this.id）。
 # ============================================================================
 
 variable "self_region" {
@@ -160,4 +164,31 @@ variable "eks_clusters" {
 variable "alarm_prefix" {
   description = "確認対象のアラーム名の接頭辞"
   type        = string
+}
+
+variable "vpc_id" {
+  type = string
+}
+variable "eks_cluster_security_group_ids" {
+  description = <<-EOT
+    クラスタ名 -> EKS のマネージド SG ID。
+    同一 state でクラスタを管理しているなら
+    { for k, c in aws_eks_cluster.this : k => c.vpc_config[0].cluster_security_group_id }
+    のように直接渡す。別 state なら remote state か tfvars から渡す。
+  EOT
+  type        = map(string)
+}
+variable "interface_endpoint_security_group_ids" {
+  description = <<-EOT
+    既存のインターフェースエンドポイントに付いているセキュリティグループ ID。
+    ここへ Lambda の SG からのインバウンド 443 を追加する。
+    複数のエンドポイントが同じ SG を共有している場合は重複を除いて渡すこと。
+  EOT
+  type        = list(string)
+}
+
+variable "rbac_group" {
+  description = "EKS アクセスエントリの kubernetesGroups。RBAC module と揃える"
+  type        = string
+  default     = "dr-switch"
 }

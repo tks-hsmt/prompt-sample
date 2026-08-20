@@ -42,8 +42,3 @@ resource "aws_lambda_function" "dr" {
     aws_security_group_rule.eks_from_dr_lambda,
   ]
 }
-
-output "function_arns" {
-  description = "Step Functions の ASL に埋める関数 ARN"
-  value       = { for k, f in aws_lambda_function.dr : k => f.arn }
-}

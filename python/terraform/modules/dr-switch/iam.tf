@@ -65,7 +65,3 @@ resource "aws_iam_role_policy_attachment" "vpc" {
   role       = aws_iam_role.dr[each.key].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
-
-output "role_arns" {
-  value = { for k, r in aws_iam_role.dr : k => r.arn }
-}

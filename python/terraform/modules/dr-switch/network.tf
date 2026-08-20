@@ -26,29 +26,6 @@
 # ルートテーブルにエンドポイントが関連付けられていれば到達できる。
 # ============================================================================
 
-variable "vpc_id" {
-  type = string
-}
-
-variable "eks_cluster_security_group_ids" {
-  description = <<-EOT
-    クラスタ名 -> EKS のマネージド SG ID。
-    同一 state でクラスタを管理しているなら
-    { for k, c in aws_eks_cluster.this : k => c.vpc_config[0].cluster_security_group_id }
-    のように直接渡す。別 state なら remote state か tfvars から渡す。
-  EOT
-  type        = map(string)
-}
-
-variable "interface_endpoint_security_group_ids" {
-  description = <<-EOT
-    既存のインターフェースエンドポイントに付いているセキュリティグループ ID。
-    ここへ Lambda の SG からのインバウンド 443 を追加する。
-    複数のエンドポイントが同じ SG を共有している場合は重複を除いて渡すこと。
-  EOT
-  type        = list(string)
-}
-
 # --- Lambda 用セキュリティグループ ------------------------------------------
 
 resource "aws_security_group" "dr_lambda" {
@@ -145,8 +122,4 @@ resource "aws_security_group_rule" "eks_from_dr_lambda" {
   security_group_id        = each.value
   source_security_group_id = aws_security_group.dr_lambda.id
   description              = "DR switch Lambda -> EKS API server (${each.key})"
-}
-
-output "lambda_security_group_id" {
-  value = aws_security_group.dr_lambda.id
 }

@@ -1,13 +1,32 @@
 # Terraform サンプル
 
-東京・大阪の両リージョンに同じ構成をデプロイする。閉塞系（block）だけが
-相手リージョンのリソースを操作するため、そこだけ `peer_*` の値を使う。
+## 構成
+
+```
+terraform/
+  modules/
+    dr-switch/          IAM・Lambda・ネットワーク・EKS アクセスエントリ
+      functions.tf      ★ 関数ごとの handler / env / policy
+      variables.tf      module の入力
+      arns.tf           変数から ARN を組み立てる
+      iam.tf            ロールとポリシー（for_each）
+      lambda.tf         関数定義（for_each）
+      network.tf        セキュリティグループ
+      eks_access.tf     EKS アクセスエントリ
+      outputs.tf
+    dr-switch-rbac/     Kubernetes RBAC（1 クラスタ分）
+  envs/
+    tokyo/              ACTIVE 側。閉塞対象は大阪
+    osaka/              STANDBY 側。閉塞対象は東京
+```
+
+`envs/*` は値を注入するだけで、リソースは `modules/*` が入力に従って作る。
 
 ## 関数を追加・変更するとき
 
-**`functions.tf` の `local.functions` にエントリを 1 つ足すだけでよい。**
-ロール・ポリシー・関数定義・RBAC はすべて `for_each` が生成するので、
-`resource` を定義しているファイルには手を入れない。
+**`modules/dr-switch/functions.tf` の `local.functions` にエントリを 1 つ
+足すだけでよい。** ロール・ポリシー・関数定義はすべて `for_each` が生成する
+ので、`resource` を定義しているファイルには手を入れない。
 
 ```hcl
 "新しい関数名" = {
@@ -22,20 +41,26 @@
 }
 ```
 
-`policy` のステートポイントに `pass_role_service` を付けると、
-`iam:PassRole` の渡し先を限定する condition が生成される。
+`policy` のステートメントに `pass_role_service` を付けると、`iam:PassRole` の
+渡し先を限定する condition が生成される。
 
-## ファイル
+## RBAC を別 module にしている理由
 
-| ファイル | 内容 | 関数追加時 |
-|---|---|---|
-| **`functions.tf`** | **関数ごとの handler / env / policy** | **ここだけ変更** |
-| `arns.tf` | 変数から ARN を組み立てる | ARN の種類が増えたときのみ |
-| `variables.tf` | 入力変数 | 変数が増えたときのみ |
-| `iam.tf` | ロールとポリシーの生成（`for_each`） | 変更不要 |
-| `lambda.tf` | 関数定義（`for_each`） | 変更不要 |
-| `network.tf` | セキュリティグループと VPC エンドポイントの許可 | 変更不要 |
-| `eks_access.tf` | EKS アクセスエントリと Kubernetes RBAC | 変更不要 |
+**Kubernetes provider はクラスタごとに 1 インスタンス必要**で、module 内では
+`for_each` で provider を切り替えられない。そのためクラスタの数だけ
+`dr-switch-rbac` を呼び出し、`providers` で対応する provider を渡す。
+
+```hcl
+module "rbac_cluster_a" {
+  source     = "../../modules/dr-switch-rbac"
+  providers  = { kubernetes = kubernetes.cluster_a }
+  namespaces = module.dr_switch.cluster_namespaces["tokyo-cluster-a"]
+  rbac_group = module.dr_switch.rbac_group
+}
+```
+
+アクセスエントリ（`aws_eks_access_entry`）は AWS provider なので本体 module に
+残している。
 
 ## 権限の一覧
 
