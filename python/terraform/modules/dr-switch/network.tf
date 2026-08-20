@@ -21,11 +21,15 @@ locals {
     k => distinct(concat([var.log_endpoint_service], v.endpoints))
   }
 
-  # (関数, エンドポイント) の組。SG ルールのキーになる。
+  # (関数, エンドポイント, SG) の組。エンドポイントに SG が複数付いていても
+  # すべてに対してルールを作る。
   endpoint_rules = merge([
-    for fn, services in local.function_endpoints : {
-      for svc in services : "${fn}/${svc}" => { fn = fn, service = svc }
-    }
+    for fn, services in local.function_endpoints : merge([
+      for svc in services : {
+        for sg in var.interface_endpoint_security_group_ids[svc] :
+        "${fn}/${svc}/${sg}" => { fn = fn, service = svc, sg = sg }
+      }
+    ]...)
   ]...)
 
   gateway_rules = merge([
@@ -75,7 +79,7 @@ resource "aws_security_group_rule" "egress_endpoint" {
   to_port                  = 443
   protocol                 = "tcp"
   security_group_id        = aws_security_group.dr_lambda[each.value.fn].id
-  source_security_group_id = var.interface_endpoint_security_group_ids[each.value.service]
+  source_security_group_id = each.value.sg
   description              = "to ${each.value.service} endpoint"
 }
 
@@ -86,7 +90,7 @@ resource "aws_security_group_rule" "endpoint_from_dr_lambda" {
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
-  security_group_id        = var.interface_endpoint_security_group_ids[each.value.service]
+  security_group_id        = each.value.sg
   source_security_group_id = aws_security_group.dr_lambda[each.value.fn].id
   description              = "from ${var.name_prefix}${each.value.fn}"
 }

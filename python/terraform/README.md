@@ -63,11 +63,20 @@ module が受け取るのは `functions`（関数名 -> 定義）とネットワ
 | `eks_cluster_security_group_ids` | クラスタ名 -> マネージド SG |
 | `name_prefix` / `rbac_group` / `gateway_endpoint_services` | 任意。既定値あり |
 
-## 対象リソースはリソース参照から取る
+## 対象リソースの取り方
 
-`envs/*/locals.tf` で、同一 state のリソースを**参照から**取る。名前を直値で
-書くと、リソース名を変えたときに権限がズレる。タイプミスも plan では検出
-されず、実行時の権限エラーになるまで気づけない。
+**state の所在で取り方を変える。**
+
+| 所在 | 取り方 | 例 |
+|---|---|---|
+| 同一 state | リソース参照 | `aws_dynamodb_table.this` |
+| 別 state（output あり） | `terraform_remote_state` | 相手リージョン、別 state の EKS クラスタ |
+| 別 state（output なし） | `data` ソース | VPC エンドポイント |
+
+### 同一 state はリソース参照
+
+名前を直値で書くと、リソース名を変えたときに権限がズレる。タイプミスも
+plan では検出されず、実行時の権限エラーになるまで気づけない。
 
 ```hcl
 self_table_names = [for t in aws_dynamodb_table.this : t.name]
@@ -79,30 +88,69 @@ self_table_arns  = [for t in aws_dynamodb_table.this : t.arn]
 無いため組み立てが必要（API Gateway の ARN にはアカウント ID が入らず、
 コロンが 2 つ続く点に注意）。
 
-依存の順序は Terraform が解決する。`data` と違い、リソース参照なら同じ apply で
-作るリソースでも問題ない。`for_each` のキーだけは plan 時に確定している必要が
-あるが、`functions` のキーと `endpoints` の文字列はどちらも静的なので問題ない。
+**依存の順序は Terraform が解決する。** `data` と違い、リソース参照なら同じ
+apply で作るリソースでも問題ない。同一 state のものに `data` を使うと、初回
+apply でまだ存在せず失敗する。
 
-### 置き換えが必要なリソース名
+同一 state の参照に output は不要。output は別 state から参照させるためのもの。
+
+### 別 state は先に作られている必要がある
+
+`terraform_remote_state` でも `data` でも、**参照先が既に存在していないと
+plan が失敗する**。これは書き方の問題ではなく、state が分かれていることの
+帰結で、変数に手打ちしても順序の制約は変わらない。
+
+手打ちを避ける利点は、**相手側で作り直したときに自動追従する**こと。
+
+### VPC エンドポイントは data で引く
+
+output が無いため `data` で引く。サービス名は
+`com.amazonaws.<region>.<service>` の固定形式で、引くサービス名は
+`functions` の `endpoints` に書いたものから自動的に集める。
+
+```hcl
+endpoint_services = distinct(concat(
+  ["logs"],
+  flatten([for f in local.functions : f.endpoints]),
+))
+
+data "aws_vpc_endpoint" "interface" {
+  for_each     = toset(local.endpoint_services)
+  vpc_id       = aws_vpc.this.id
+  service_name = "com.amazonaws.${local.self_region}.${each.key}"
+}
+```
+
+**エンドポイントを追加しても、`functions` に `endpoints` を書けば自動で
+引かれる。** `locals.tf` にも手を入れない。
+
+SG は複数付いていてもよい。module 側で (関数, エンドポイント, SG) の
+3 つ組でルールを作る。
+
+### 置き換えが必要なもの
 
 以下は**仮の名前**。実際の構成に合わせて置き換えること。
 
 ```
-aws_vpc.this                   aws_subnet.private
-aws_api_gateway_rest_api.this  aws_api_gateway_stage.this
-aws_scheduler_schedule_group.this
-aws_s3_bucket.this             aws_iam_role.s3_replication
-aws_iam_role.scheduler_target
-aws_lambda_function.app        aws_lambda_function.pod_restart
-aws_dynamodb_table.this        aws_efs_file_system.this
-aws_lb.this                    aws_lb_target_group.this
-aws_eks_cluster.this           （キーは "a" / "b" を仮置き）
+同一 state のリソース名
+  aws_vpc.this                   aws_subnet.private
+  aws_api_gateway_rest_api.this  aws_api_gateway_stage.this
+  aws_scheduler_schedule_group.this
+  aws_s3_bucket.this             aws_iam_role.s3_replication
+  aws_iam_role.scheduler_target
+  aws_lambda_function.app        aws_lambda_function.pod_restart
+  aws_dynamodb_table.this        aws_efs_file_system.this
+  aws_lb.this                    aws_lb_target_group.this
+  aws_eks_cluster.this
+
+別 state の output 名
+  相手リージョン  rest_api_id / stage_name / schedule_group / schedule_role_arn
+                  replication_buckets / replication_bucket_arns / replication_role_arn
+  EKS クラスタ    cluster_name / cluster_arn / cluster_security_group_id
 ```
 
-`variables.tf` に残しているのは**別 state から受け取るものだけ**。相手
-リージョンのリソースと、インターフェースエンドポイントの SG。
-`terraform_remote_state` で引く場合は変数を消し、`locals.tf` で
-`data.terraform_remote_state.xxx.outputs.yyy` を参照する。
+`variables.tf` に残っているのは**別 state のバックエンド情報と `image_uri`
+だけ**。
 
 ## 権限の一覧
 

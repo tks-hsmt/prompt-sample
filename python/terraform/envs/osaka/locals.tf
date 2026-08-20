@@ -1,16 +1,19 @@
 # ============================================================================
 # 大阪リージョン（STANDBY 側）の対象リソース
 #
-# 同一 state で管理しているリソースは**リソース参照から取る**。名前を直値で
-# 書くと、リソース名を変えたときに権限がズレる。タイプミスも plan では
-# 検出されず、実行時の権限エラーになるまで気づけない。
+# 閉塞対象は東京。開放系・観測系は大阪を見る。
 #
-# ARN も文字列で組み立てない。参照から取れば、フォーマットを間違える余地が
-# 無くなる。
+# state の所在ごとに取り方を変える。
 #
-# ★ 以下のリソース名（aws_dynamodb_table.this など）は仮。実際の名前に
-#   置き換えること。相手リージョン（peer_*）のリソースは別 state なので
-#   terraform_remote_state か変数で受け取る。
+#   同一 state           リソース参照（aws_xxx.this）。依存は Terraform が解決する
+#   別 state / output 有 terraform_remote_state
+#   別 state / output 無 data ソース
+#
+# 別 state のものは**先に作られている必要がある**。これは書き方ではなく
+# state が分かれていることの帰結で、どの取り方でも変わらない。
+#
+# ★ 以下のリソース名（aws_dynamodb_table.this など）と output 名は仮。
+#   実際のものに置き換えること。
 # ============================================================================
 
 locals {
@@ -18,10 +21,8 @@ locals {
   peer_region = "ap-northeast-1"
 
   # --- API Gateway ---------------------------------------------------------
-  # ARN にはアカウント ID が入らない（コロンが 2 つ続く）ため、
-  # stage リソースの ARN 属性ではなく execution_arn とも別物になる。
-  # aws_api_gateway_stage には管理用 ARN の属性が無いので、rest_api の id と
-  # stage_name から組み立てる。
+  # ARN にはアカウント ID が入らない（コロンが 2 つ続く）。
+  # aws_api_gateway_stage には管理用 ARN の属性が無いので組み立てる。
 
   self_rest_api_id = aws_api_gateway_rest_api.this.id
   self_stage_name  = aws_api_gateway_stage.this.stage_name
@@ -29,8 +30,8 @@ locals {
   self_api_arn   = "arn:aws:apigateway:${local.self_region}::/restapis/${local.self_rest_api_id}"
   self_stage_arn = "${local.self_api_arn}/stages/${local.self_stage_name}"
 
-  peer_rest_api_id = var.peer_rest_api_id
-  peer_stage_name  = var.peer_stage_name
+  peer_rest_api_id = data.terraform_remote_state.peer.outputs.rest_api_id
+  peer_stage_name  = data.terraform_remote_state.peer.outputs.stage_name
   peer_stage_arn   = "arn:aws:apigateway:${local.peer_region}::/restapis/${local.peer_rest_api_id}/stages/${local.peer_stage_name}"
 
   # --- EventBridge Scheduler -----------------------------------------------
@@ -40,20 +41,20 @@ locals {
   self_schedule_arn       = "arn:aws:scheduler:${local.self_region}:${data.aws_caller_identity.current.account_id}:schedule/${local.self_schedule_group}/*"
   self_schedule_role_arn  = aws_iam_role.scheduler_target.arn
 
-  peer_schedule_group    = var.peer_schedule_group
-  peer_schedule_arn      = var.peer_schedule_arn
-  peer_schedule_role_arn = var.peer_schedule_role_arn
+  peer_schedule_group    = data.terraform_remote_state.peer.outputs.schedule_group
+  peer_schedule_arn      = "arn:aws:scheduler:${local.peer_region}:${data.aws_caller_identity.current.account_id}:schedule/${local.peer_schedule_group}/*"
+  peer_schedule_role_arn = data.terraform_remote_state.peer.outputs.schedule_role_arn
 
   # --- S3 ------------------------------------------------------------------
 
   self_buckets     = [for b in aws_s3_bucket.this : b.bucket]
   self_bucket_arns = [for b in aws_s3_bucket.this : b.arn]
 
-  peer_buckets     = var.peer_replication_buckets
-  peer_bucket_arns = var.peer_replication_bucket_arns
+  peer_buckets     = data.terraform_remote_state.peer.outputs.replication_buckets
+  peer_bucket_arns = data.terraform_remote_state.peer.outputs.replication_bucket_arns
 
   self_replication_role_arn = aws_iam_role.s3_replication.arn
-  peer_replication_role_arn = var.peer_replication_role_arn
+  peer_replication_role_arn = data.terraform_remote_state.peer.outputs.replication_role_arn
 
   # --- Lambda / DynamoDB / EFS ---------------------------------------------
 
@@ -72,19 +73,23 @@ locals {
   self_load_balancer_arns = [for l in aws_lb.this : l.arn]
 
   # --- EKS -----------------------------------------------------------------
+  # 1 つは同一 state、1 つは別 state（output あり）。
 
-  cluster_names = [for c in aws_eks_cluster.this : c.name]
-  self_cluster_arns = [for c in aws_eks_cluster.this : c.arn]
+  own_cluster      = aws_eks_cluster.this
+  external_cluster = data.terraform_remote_state.eks_external.outputs
+
+  cluster_names = [local.own_cluster.name, local.external_cluster.cluster_name]
+
+  self_cluster_arns = [local.own_cluster.arn, local.external_cluster.cluster_arn]
 
   eks_cluster_security_group_ids = {
-    for k, c in aws_eks_cluster.this :
-    c.name => c.vpc_config[0].cluster_security_group_id
+    (local.own_cluster.name)              = local.own_cluster.vpc_config[0].cluster_security_group_id
+    (local.external_cluster.cluster_name) = local.external_cluster.cluster_security_group_id
   }
 
-  # dr_switch の EKS_CLUSTERS にそのまま渡す形。
   # namespace と再起動対象はワークロードの定義に依存するのでここで指定する。
   clusters = {
-    (aws_eks_cluster.this["a"].name) = [
+    (local.own_cluster.name) = [
       {
         name = "gems-ip"
         restart_targets = [
@@ -93,7 +98,7 @@ locals {
         ]
       },
     ]
-    (aws_eks_cluster.this["b"].name) = [{ name = "gems-ip", restart_targets = [] }]
+    (local.external_cluster.cluster_name) = [{ name = "gems-ip", restart_targets = [] }]
   }
 
   eks_clusters_env = [
@@ -124,13 +129,49 @@ locals {
   pod_restart_arns           = [for f in aws_lambda_function.pod_restart : f.arn]
   pod_restart_timeout        = 300
 
+  # --- VPC エンドポイント（別 state / output 無し） --------------------------
+  # data で引く。別 state で既に存在するため、これは正しい使い方。
+  # 引くサービス名は functions の endpoints に書いたものと同じ。
+
+  endpoint_services = distinct(concat(
+    ["logs"],
+    flatten([for f in local.functions : f.endpoints]),
+  ))
+
+  interface_endpoint_security_group_ids = {
+    for k, e in data.aws_vpc_endpoint.interface : k => e.security_group_ids
+  }
+
   # --- その他 --------------------------------------------------------------
 
   alarm_prefix = "gems-ip-"
-
-  # 別 state のインターフェースエンドポイント。サービス名 -> SG ID。
-  interface_endpoint_security_group_ids = var.interface_endpoint_security_group_ids
 }
 
-# scheduler の ARN 組み立てにのみ使う。他はリソース参照から取る。
+# scheduler の ARN 組み立てにのみ使う。他はリソース参照または output から取る。
 data "aws_caller_identity" "current" {}
+
+# 別 state（output あり）
+data "terraform_remote_state" "peer" {
+  backend = "s3"
+  config = {
+    bucket = var.peer_state_bucket
+    key    = var.peer_state_key
+    region = local.peer_region
+  }
+}
+
+data "terraform_remote_state" "eks_external" {
+  backend = "s3"
+  config = {
+    bucket = var.eks_external_state_bucket
+    key    = var.eks_external_state_key
+    region = local.self_region
+  }
+}
+
+# 別 state（output 無し）。サービス名で引く。
+data "aws_vpc_endpoint" "interface" {
+  for_each     = toset(local.endpoint_services)
+  vpc_id       = aws_vpc.this.id
+  service_name = "com.amazonaws.${local.self_region}.${each.key}"
+}

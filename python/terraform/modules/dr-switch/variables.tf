@@ -78,14 +78,14 @@ variable "vpc_subnet_ids" {
 
 variable "interface_endpoint_security_group_ids" {
   description = <<-EOT
-    サービス名 -> インターフェースエンドポイントの SG ID。
+    サービス名 -> インターフェースエンドポイントの SG ID のリスト。
     エンドポイントごとに SG が分かれている前提で、関数ごとに必要な
     エンドポイントにだけ ingress を追加する。
 
     functions の endpoints で指定するサービス名と、logs のキーが必要。
-    例: { logs = "sg-a", apigateway = "sg-b", scheduler = "sg-c", ... }
+    例: { logs = ["sg-a"], apigateway = ["sg-b"], ... }
   EOT
-  type        = map(string)
+  type        = map(list(string))
 }
 
 variable "log_endpoint_service" {
