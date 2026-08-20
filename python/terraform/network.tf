@@ -30,6 +30,16 @@ variable "vpc_id" {
   type = string
 }
 
+variable "eks_cluster_security_group_ids" {
+  description = <<-EOT
+    クラスタ名 -> EKS のマネージド SG ID。
+    同一 state でクラスタを管理しているなら
+    { for k, c in aws_eks_cluster.this : k => c.vpc_config[0].cluster_security_group_id }
+    のように直接渡す。別 state なら remote state か tfvars から渡す。
+  EOT
+  type        = map(string)
+}
+
 variable "interface_endpoint_security_group_ids" {
   description = <<-EOT
     既存のインターフェースエンドポイントに付いているセキュリティグループ ID。
@@ -66,35 +76,39 @@ resource "aws_security_group_rule" "dr_lambda_egress_endpoints" {
   description              = "to interface VPC endpoints"
 }
 
+# for_each のキーは plan 時に確定している必要があるため、data の結果ではなく
+# 変数を使う。data は値（SG ID）の参照にだけ使う。
 resource "aws_security_group_rule" "dr_lambda_egress_eks" {
-  for_each = data.aws_eks_cluster.target
+  for_each = var.eks_cluster_security_group_ids
 
   type                     = "egress"
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
   security_group_id        = aws_security_group.dr_lambda.id
-  source_security_group_id = each.value.vpc_config[0].cluster_security_group_id
+  source_security_group_id = each.value
   description              = "to EKS API server (${each.key})"
 }
 
 # Gateway 型エンドポイント（s3 / dynamodb）はプレフィックスリスト宛の
 # アウトバウンドが要る。宛先 SG では表現できない。
-data "aws_vpc_endpoint" "gateway" {
-  for_each     = toset(["s3", "dynamodb"])
-  vpc_id       = var.vpc_id
-  service_name = "com.amazonaws.${var.self_region}.${each.key}"
+#
+# プレフィックスリストは AWS が管理していて常に存在するため data で引いてよい。
+# 自チームが作成するリソースではないので、初回 apply でも失敗しない。
+data "aws_ec2_managed_prefix_list" "gateway" {
+  for_each = toset(["s3", "dynamodb"])
+  name     = "com.amazonaws.${var.self_region}.${each.key}"
 }
 
 resource "aws_security_group_rule" "dr_lambda_egress_gateway" {
-  for_each = data.aws_vpc_endpoint.gateway
+  for_each = toset(["s3", "dynamodb"])
 
   type              = "egress"
   from_port         = 443
   to_port           = 443
   protocol          = "tcp"
   security_group_id = aws_security_group.dr_lambda.id
-  prefix_list_ids   = [each.value.prefix_list_id]
+  prefix_list_ids   = [data.aws_ec2_managed_prefix_list.gateway[each.key].id]
   description       = "to ${each.key} gateway endpoint"
 }
 
@@ -116,22 +130,21 @@ resource "aws_security_group_rule" "endpoint_from_dr_lambda" {
 # クラスタのマネージド SG（EKS が作成し、コントロールプレーンの ENI に付く）
 # へ Lambda の SG からの 443 を許可する。これが無いと kubeconfig を作れても
 # API サーバへ到達できない。
-
-data "aws_eks_cluster" "target" {
-  for_each = toset(var.self_cluster_names)
-  name     = each.key
-}
+#
+# SG ID は変数で受け取る。data で引くと、クラスタを同じ Terraform で作る
+# 構成では初回 apply 時にまだ存在せず失敗する。同一 state ならクラスタ
+# リソースの vpc_config[0].cluster_security_group_id を直接渡すこと。
 
 resource "aws_security_group_rule" "eks_from_dr_lambda" {
-  for_each = data.aws_eks_cluster.target
+  for_each = var.eks_cluster_security_group_ids
 
   type                     = "ingress"
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
-  security_group_id        = each.value.vpc_config[0].cluster_security_group_id
+  security_group_id        = each.value
   source_security_group_id = aws_security_group.dr_lambda.id
-  description              = "DR switch Lambda -> EKS API server"
+  description              = "DR switch Lambda -> EKS API server (${each.key})"
 }
 
 output "lambda_security_group_id" {

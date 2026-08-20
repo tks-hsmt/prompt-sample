@@ -3,15 +3,39 @@
 東京・大阪の両リージョンに同じ構成をデプロイする。閉塞系（block）だけが
 相手リージョンのリソースを操作するため、そこだけ `peer_*` の値を使う。
 
+## 関数を追加・変更するとき
+
+**`functions.tf` の `local.functions` にエントリを 1 つ足すだけでよい。**
+ロール・ポリシー・関数定義・RBAC はすべて `for_each` が生成するので、
+`resource` を定義しているファイルには手を入れない。
+
+```hcl
+"新しい関数名" = {
+  handler = "dr_switch.xxx.handlers.yyy"
+  env     = { REGION = var.self_region, ... }
+  policy = [{
+    actions   = ["service:Action"]
+    resources = [local.xxx_arn]
+  }]
+  # timeout = 120   任意。既定は local.default_timeout（60 秒）
+  # vpc     = false 任意。既定は true（全関数を VPC 内に配置する方針）
+}
+```
+
+`policy` のステートポイントに `pass_role_service` を付けると、
+`iam:PassRole` の渡し先を限定する condition が生成される。
+
 ## ファイル
 
-| ファイル | 内容 |
-|---|---|
-| `variables.tf` | 入力変数 |
-| `iam.tf` | 実行ロールと最小権限 |
-| `eks_access.tf` | EKS アクセスエントリと Kubernetes RBAC |
-| `lambda.tf` | 関数定義（17 本） |
-| `network.tf` | セキュリティグループと VPC エンドポイントの許可 |
+| ファイル | 内容 | 関数追加時 |
+|---|---|---|
+| **`functions.tf`** | **関数ごとの handler / env / policy** | **ここだけ変更** |
+| `arns.tf` | 変数から ARN を組み立てる | ARN の種類が増えたときのみ |
+| `variables.tf` | 入力変数 | 変数が増えたときのみ |
+| `iam.tf` | ロールとポリシーの生成（`for_each`） | 変更不要 |
+| `lambda.tf` | 関数定義（`for_each`） | 変更不要 |
+| `network.tf` | セキュリティグループと VPC エンドポイントの許可 | 変更不要 |
+| `eks_access.tf` | EKS アクセスエントリと Kubernetes RBAC | 変更不要 |
 
 ## 権限の一覧
 
@@ -35,9 +59,8 @@
 | eks-rollout-restart | 同上（＋ Kubernetes RBAC の `patch`） | 同上 |
 | eks-restart-pods | `lambda:InvokeFunction` | 再起動関数 |
 
-全関数に `AWSLambdaBasicExecutionRole`（CloudWatch Logs）を付与する。
-**全関数を VPC 内に配置する方針**なので、`AWSLambdaVPCAccessExecutionRole`
-（ENI の作成・削除）も全関数に付ける。
+全関数に `AWSLambdaBasicExecutionRole`（CloudWatch Logs）と、VPC 配置のため
+`AWSLambdaVPCAccessExecutionRole`（ENI の作成・削除）を付与する。
 
 ### `Resource: "*"` にせざるを得ないもの
 
@@ -52,27 +75,39 @@
 `UpdateSchedule` が `Target.RoleArn` を含む全パラメータを要求するため、
 これがないと失敗する。他のどの関数にも不要な権限なので見落としやすい。
 
-`iam:PassedToService` 条件で渡し先を限定している。
+## ARN の組み立て
 
-## Kubernetes RBAC
+対象リソースの ID を変数で受け取り、`arns.tf` で ARN を文字列として組み立てる。
+**同一 state でリソースを管理しているなら、変数にリソース参照を渡すこと。**
 
-マネージドのアクセスポリシー（`AmazonEKSViewPolicy`）は使わない。
+```hcl
+self_rest_api_id = aws_api_gateway_rest_api.this.id
+```
 
-- `cluster` スコープ … 全 namespace の全リソースが読めてしまい広すぎる
-- `namespace` スコープ … 必要な権限を過不足なく表現できない
+## data ソースを使わない箇所
 
-`kubernetesGroups` でグループにマッピングし、namespace ごとの `Role` と
-`RoleBinding` を自前で作る。`check` は `list` のみ、`rollout_restart` は
-`patch` を別 Role で付与する。
+**自チームが Terraform で管理するリソースは `data` で引かない。** 同じ
+Terraform で作る構成だと、初回 apply 時にまだ存在せず失敗する。
 
-Node（クラスタスコープ）を確認しない設計なので、**`ClusterRoleBinding` は不要**。
+| 対象 | 渡し方 |
+|---|---|
+| EKS のマネージド SG | `eks_cluster_security_group_ids`（変数） |
+| インターフェースエンドポイントの SG | `interface_endpoint_security_group_ids`（変数） |
+
+残っている `data` は 3 つで、いずれも自チームが作るリソースではない。
+
+- `aws_caller_identity` … 呼び出し元の情報
+- `aws_iam_policy_document` … ローカルで JSON を組み立てるだけ。API 呼び出しなし
+- `aws_ec2_managed_prefix_list` … AWS が管理し常に存在する
+
+なお `for_each` のキーは plan 時に確定している必要がある。`data` の結果を
+`for_each` に渡すと「キーが事前に確定できない」というエラーになるため、
+変数または locals 由来の値を使う。
 
 ## ネットワーク
 
 **全 Lambda を VPC 内に配置する。** NAT ゲートウェイが無いためパブリック
 インターネットへは出られず、AWS API へは VPC エンドポイント経由で到達する。
-
-`aws_security_group.dr_lambda` を新規に作り、全関数がこれを使う。
 
 ### 必要な経路
 
@@ -94,9 +129,15 @@ Node（クラスタスコープ）を確認しない設計なので、**`Cluster
 `logs` は全関数に必要。見落とすとログが一切出ず、しかも関数自体は
 タイムアウトするまで気づけない。
 
-Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たない。ルート
-テーブルに関連付けられていれば到達でき、Lambda 側はプレフィックスリスト宛の
-アウトバウンドを許可する。
+### 閉塞系のクロスリージョンアクセス
+
+`apigateway-block` / `scheduler-block` / `s3-block` は相手リージョンの API を
+叩く。クロスリージョン PrivateLink は `apigateway` / `scheduler` に未対応の
+ため、**相手リージョン側の Interface VPCE へ VPC Peering と Route 53 Resolver
+の条件付き転送で到達する**（既存のクロスリージョンエンドポイントアクセス方針）。
+
+boto3 は `region_name` からホスト名を組み立てるだけなので、DNS が相手側
+VPCE のプライベート IP に解決されれば**コードの変更は不要**。
 
 ### 追加するルール
 
@@ -109,8 +150,20 @@ Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たな�
 | **EKS クラスタ SG の ingress** | Lambda SG | 443 |
 
 最後の 1 つが要点。**これが無いと kubeconfig を生成できても API サーバへ
-到達できない。** 対象は EKS が作成するマネージド SG
-（`vpc_config[0].cluster_security_group_id`）。
+到達できない。**
+
+## Kubernetes RBAC
+
+マネージドのアクセスポリシー（`AmazonEKSViewPolicy`）は使わない。
+
+- `cluster` スコープ … 全 namespace の全リソースが読めてしまい広すぎる
+- `namespace` スコープ … 必要な権限を過不足なく表現できない
+
+`kubernetesGroups` でグループにマッピングし、namespace ごとの `Role` と
+`RoleBinding` を自前で作る。`check` は `list` のみ、`rollout_restart` は
+`patch` を別 Role で付与する。
+
+Node（クラスタスコープ）を確認しない設計なので、**`ClusterRoleBinding` は不要**。
 
 ## タイムアウト
 
@@ -122,5 +175,5 @@ Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たな�
 
 ## 確認済みの整合性
 
-コード側のハンドラ 17 本と Terraform の関数定義が一致し、各設定クラスが
-`required` としている環境変数がすべて渡されていることを機械的に検証済み。
+コード側のハンドラ 17 本と `local.functions` が一致し、`resource` を定義する
+ファイルに関数名の個別記述が無いことを機械的に検証済み。

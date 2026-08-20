@@ -11,19 +11,10 @@
 locals {
   dr_group = "dr-switch"
 
-  # クラスタ名 -> 対象 namespace のリスト
+  # クラスタ名 -> 対象 namespace 名のリスト
   cluster_namespaces = {
-    for c in var.eks_clusters : c.name => c.namespaces
+    for c in var.eks_clusters : c.name => [for n in c.namespaces : n.name]
   }
-}
-
-variable "eks_clusters" {
-  description = "確認・再起動の対象。dr_switch の EKS_CLUSTERS と同じ内容を渡す"
-  type = list(object({
-    name       = string
-    namespaces = list(string)
-  }))
-  default = []
 }
 
 # --- アクセスエントリ -------------------------------------------------------
@@ -31,8 +22,7 @@ variable "eks_clusters" {
 
 resource "aws_eks_access_entry" "dr" {
   for_each = {
-    for pair in setproduct(keys(local.cluster_namespaces),
-    ["eks-check", "eks-rollout-restart"]) :
+    for pair in setproduct(keys(local.cluster_namespaces), local.eks_functions) :
     "${pair[0]}/${pair[1]}" => { cluster = pair[0], fn = pair[1] }
   }
 

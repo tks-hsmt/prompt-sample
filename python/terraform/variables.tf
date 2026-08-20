@@ -92,10 +92,6 @@ variable "self_file_system_ids" {
   type = list(string)
 }
 
-variable "self_cluster_names" {
-  type = list(string)
-}
-
 variable "pod_restart_function_names" {
   description = "restart_pods が Invoke する既存の Pod 再起動 Lambda"
   type        = list(string)
@@ -110,6 +106,55 @@ variable "vpc_subnet_ids" {
     到達できるプライベートサブネットを指定する。
   EOT
   type        = list(string)
+}
+
+variable "throttle_rate" {
+  description = "開放時に戻すスロットリング値。現在ステージに設定されている値と揃える"
+  type        = string
+  default     = "10000"
+}
+
+variable "throttle_burst" {
+  type    = string
+  default = "5000"
+}
+
+variable "image_uri" {
+  description = "ECR のイメージ URI（ダイジェスト指定を推奨）"
+  type        = string
+}
+
+variable "self_target_group_arns" {
+  type = list(string)
+}
+
+variable "self_load_balancer_arns" {
+  type    = list(string)
+  default = []
+}
+
+variable "pod_restart_timeout" {
+  description = "呼ばれる側の Lambda の Timeout に合わせる"
+  type        = number
+  default     = 300
+}
+
+variable "eks_clusters" {
+  description = <<-EOT
+    確認・再起動の対象。dr_switch の EKS_CLUSTERS にそのまま渡す内容。
+    restart_targets が空の namespace は check の対象にはなるが再起動しない。
+  EOT
+  type = list(object({
+    name = string
+    namespaces = list(object({
+      name = string
+      restart_targets = optional(list(object({
+        kind = string
+        name = string
+      })), [])
+    }))
+  }))
+  default = []
 }
 
 variable "alarm_prefix" {
