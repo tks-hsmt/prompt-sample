@@ -100,6 +100,24 @@ locals {
     for name, namespaces in local.clusters : { name = name, namespaces = namespaces }
   ]
 
+  # アクセスポリシーの関連付け。namespace スコープで付与する。
+  eks_view_access = [
+    for name, namespaces in local.clusters : {
+      cluster    = name
+      policy     = "AmazonEKSViewPolicy"
+      namespaces = [for n in namespaces : n.name]
+    }
+  ]
+
+  # rollout_restart の対象がある namespace だけに Edit を付ける
+  eks_edit_access = [
+    for name, namespaces in local.clusters : {
+      cluster    = name
+      policy     = "AmazonEKSEditPolicy"
+      namespaces = [for n in namespaces : n.name if length(n.restart_targets) > 0]
+    } if length([for n in namespaces : n if length(n.restart_targets) > 0]) > 0
+  ]
+
   # --- Pod 再起動（既存 Lambda を呼ぶ方式を使う場合） -----------------------
 
   pod_restart_function_names = [for f in aws_lambda_function.pod_restart : f.function_name]

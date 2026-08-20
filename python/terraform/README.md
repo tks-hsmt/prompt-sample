@@ -10,15 +10,14 @@ terraform/
       iam.tf          ロールとポリシー（for_each）
       lambda.tf       関数定義（for_each）
       network.tf      セキュリティグループ
-      eks_access.tf   EKS アクセスエントリ
+      eks_access.tf   アクセスエントリとアクセスポリシー
       outputs.tf
-    dr-switch-rbac/   Kubernetes RBAC（1 クラスタ分）
   envs/
     tokyo/            ACTIVE 側。閉塞対象は大阪
       functions.tf    ★ 対象 Lambda の定義（追加・変更はここだけ）
       locals.tf       対象リソースの識別子と ARN
       main.tf         module 呼び出し
-      providers.tf    AWS / Kubernetes provider
+      providers.tf    AWS provider
       variables.tf    別 state から受け取る値
     osaka/            STANDBY 側。閉塞対象は東京
 ```
@@ -104,24 +103,6 @@ aws_eks_cluster.this           （キーは "a" / "b" を仮置き）
 リージョンのリソースと、インターフェースエンドポイントの SG。
 `terraform_remote_state` で引く場合は変数を消し、`locals.tf` で
 `data.terraform_remote_state.xxx.outputs.yyy` を参照する。
-
-## RBAC を別 module にしている理由
-
-**Kubernetes provider はクラスタごとに 1 インスタンス必要**で、module 内では
-`for_each` で provider を切り替えられない。そのためクラスタの数だけ
-`dr-switch-rbac` を呼び出し、`providers` で対応する provider を渡す。
-
-```hcl
-module "rbac_cluster_a" {
-  source     = "../../modules/dr-switch-rbac"
-  providers  = { kubernetes = kubernetes.cluster_a }
-  namespaces = [for n in local.clusters["tokyo-cluster-a"] : n.name]
-  rbac_group = module.dr_switch.rbac_group
-}
-```
-
-アクセスエントリ（`aws_eks_access_entry`）は AWS provider なので本体 module に
-残している。`eks = true` の関数だけが対象になる。
 
 ## 権限の一覧
 
@@ -277,18 +258,47 @@ VPCE のプライベート IP に解決されれば**コードの変更は不要
 この場合、`interface_endpoint_security_group_ids` に渡すのは**相手リージョン側
 エンドポイントの SG** になる。
 
-## Kubernetes RBAC
+## EKS の権限
 
-マネージドのアクセスポリシー（`AmazonEKSViewPolicy`）は使わない。
+### 前提
 
-- `cluster` スコープ … 全 namespace の全リソースが読めてしまい広すぎる
-- `namespace` スコープ … 必要な権限を過不足なく表現できない
+クラスタの `authenticationMode` が **`API` または `API_AND_CONFIG_MAP`** で
+あること。`CONFIG_MAP`（EKS API の既定）ではアクセスエントリを作成できない。
+一度アクセスエントリ方式を有効にすると元に戻せない。
 
-`kubernetesGroups` でグループにマッピングし、namespace ごとの `Role` と
-`RoleBinding` を自前で作る。`check` は `list` のみ、`rollout_restart` は
-`patch` を別 Role で付与する。
+```bash
+aws eks describe-cluster --name <cluster> --query 'accessConfig.authenticationMode'
+```
 
-Node（クラスタスコープ）を確認しない設計なので、**`ClusterRoleBinding` は不要**。
+### 付与するもの
+
+`aws_eks_access_entry` でロールをクラスタに登録し、
+`aws_eks_access_policy_association` で**マネージドのアクセスポリシーを
+namespace スコープ**で付与する。
+
+| 関数 | ポリシー | スコープ |
+|---|---|---|
+| `eks-check` | `AmazonEKSViewPolicy` | 対象の全 namespace |
+| `eks-rollout-restart` | `AmazonEKSEditPolicy` | **`restart_targets` がある namespace のみ** |
+
+`restart_targets` が空の namespace には Edit を付けない。確認だけする
+クラスタには View しか付かない。
+
+### 自前の Role / RoleBinding を使わない理由
+
+Kubernetes provider が必要になり、クラスタごとに provider の alias を切る
+ことになる（module 内では `for_each` で provider を切り替えられないため、
+クラスタの数だけ module を呼び出す形になる）。Terraform の適用にクラスタへの
+到達性も要る。
+
+権限は自前 Role の方が狭くできる（`list` / `patch` のみ）が、`Edit` が余分に
+許可するのは Pod の削除やリソース作成で、**ここで動くのは自分たちが書いた
+コードだけ**。コードは `list_namespaced_deployment` と
+`patch_namespaced_deployment` しか呼ばない。
+
+なお `patch` を許可するポリシーは `AmazonEKSEditPolicy` しかなく、
+**自前のアクセスポリシーは作成できない**ため、`rollout_restart` に関しては
+選択肢が無い。
 
 ## タイムアウト
 

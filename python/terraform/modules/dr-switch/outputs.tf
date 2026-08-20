@@ -12,8 +12,3 @@ output "security_group_ids" {
   description = "関数名 -> セキュリティグループ"
   value       = { for k, s in aws_security_group.dr_lambda : k => s.id }
 }
-
-output "rbac_group" {
-  description = "RBAC module に渡すグループ名"
-  value       = var.rbac_group
-}

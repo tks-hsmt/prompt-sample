@@ -34,9 +34,15 @@ locals {
     }
   ]...)
 
+  # 関数 -> 到達する EKS クラスタ。SG ルールとアクセスエントリのキーになる。
   eks_rules = merge([
     for fn, v in local.vpc_functions : {
-      for cluster in v.eks_clusters : "${fn}/${cluster}" => { fn = fn, cluster = cluster }
+      for a in v.eks_access : "${fn}/${a.cluster}" => {
+        fn         = fn
+        cluster    = a.cluster
+        policy     = a.policy
+        namespaces = a.namespaces
+      }
     }
   ]...)
 

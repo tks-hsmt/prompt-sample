@@ -252,18 +252,20 @@ locals {
     # IAM 側は kubeconfig 生成に必要な分だけ。
     "eks-check" = {
       handler = "dr_switch.eks.handlers.check"
-      endpoints = ["eks", "eks-auth", "sts"]
-      eks_clusters = local.cluster_names
-      env     = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
-      policy  = local.eks_access_policy
+      endpoints  = ["eks", "eks-auth", "sts"]
+      eks_access = local.eks_view_access
+      env        = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
+      policy     = local.eks_iam_policy
     }
 
+    # patch を許可するポリシーは AmazonEKSEditPolicy しかない。
+    # 自前ポリシーは作成できないため、これを namespace スコープで付与する。
     "eks-rollout-restart" = {
-      handler = "dr_switch.eks.handlers.rollout_restart"
-      endpoints = ["eks", "eks-auth", "sts"]
-      eks_clusters = local.cluster_names
-      env     = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
-      policy  = local.eks_access_policy
+      handler    = "dr_switch.eks.handlers.rollout_restart"
+      endpoints  = ["eks", "eks-auth", "sts"]
+      eks_access = local.eks_edit_access
+      env        = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
+      policy     = local.eks_iam_policy
     }
 
     # 呼ばれる側は Pod の起動完了を待つため、その Timeout を上回る値にする
@@ -283,8 +285,8 @@ locals {
     }
   }
 
-  # eks-check と eks-rollout-restart で共通
-  eks_access_policy = [
+  # eks-check と eks-rollout-restart で共通の IAM ポリシー
+  eks_iam_policy = [
     {
       actions   = ["eks:DescribeCluster"]
       resources = local.self_cluster_arns

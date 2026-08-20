@@ -19,7 +19,10 @@ variable "functions" {
       endpoints          この関数が到達するインターフェースエンドポイントの
                          サービス名。logs は全関数に自動で付くので書かない
       gateway_endpoints  Gateway 型（s3 / dynamodb）のサービス名
-      eks_clusters       到達する EKS クラスタ名。EKS アクセスエントリも作る
+      eks_access         到達する EKS クラスタと付与するアクセスポリシー
+                           cluster     クラスタ名
+                           policy      AmazonEKSViewPolicy / AmazonEKSEditPolicy
+                           namespaces  スコープする namespace
       timeout            任意。既定 60 秒
       vpc                任意。既定 true（全関数を VPC 内に配置する方針）
   EOT
@@ -33,7 +36,11 @@ variable "functions" {
     }))
     endpoints         = optional(list(string), [])
     gateway_endpoints = optional(list(string), [])
-    eks_clusters      = optional(list(string), [])
+    eks_access = optional(list(object({
+      cluster    = string
+      policy     = string
+      namespaces = list(string)
+    })), [])
     timeout           = optional(number, 60)
     vpc               = optional(bool, true)
   }))
@@ -98,8 +105,3 @@ variable "eks_cluster_security_group_ids" {
   default     = {}
 }
 
-variable "rbac_group" {
-  description = "EKS アクセスエントリの kubernetesGroups。RBAC module と揃える"
-  type        = string
-  default     = "dr-switch"
-}
