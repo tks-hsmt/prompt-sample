@@ -11,6 +11,7 @@
 | `iam.tf` | 実行ロールと最小権限 |
 | `eks_access.tf` | EKS アクセスエントリと Kubernetes RBAC |
 | `lambda.tf` | 関数定義（17 本） |
+| `network.tf` | セキュリティグループと VPC エンドポイントの許可 |
 
 ## 権限の一覧
 
@@ -35,8 +36,8 @@
 | eks-restart-pods | `lambda:InvokeFunction` | 再起動関数 |
 
 全関数に `AWSLambdaBasicExecutionRole`（CloudWatch Logs）を付与する。
-`eks-check` と `eks-rollout-restart` は VPC 配置するため
-`AWSLambdaVPCAccessExecutionRole` も付ける。
+**全関数を VPC 内に配置する方針**なので、`AWSLambdaVPCAccessExecutionRole`
+（ENI の作成・削除）も全関数に付ける。
 
 ### `Resource: "*"` にせざるを得ないもの
 
@@ -65,6 +66,51 @@
 `patch` を別 Role で付与する。
 
 Node（クラスタスコープ）を確認しない設計なので、**`ClusterRoleBinding` は不要**。
+
+## ネットワーク
+
+**全 Lambda を VPC 内に配置する。** NAT ゲートウェイが無いためパブリック
+インターネットへは出られず、AWS API へは VPC エンドポイント経由で到達する。
+
+`aws_security_group.dr_lambda` を新規に作り、全関数がこれを使う。
+
+### 必要な経路
+
+| 接続先 | 用途 | 種別 |
+|---|---|---|
+| `logs` | **全関数**のログ出力 | Interface |
+| `apigateway` | apigateway 系 3 関数 | Interface |
+| `scheduler` | scheduler 系 3 関数 | Interface |
+| `elasticloadbalancing` | nlb-check | Interface |
+| `monitoring` | cloudwatch-check | Interface |
+| `lambda` | lambda-check / eks-restart-pods | Interface |
+| `elasticfilesystem` | efs-check | Interface |
+| `eks` | eks 系 2 関数 | Interface |
+| `eks-auth` | eks 系 2 関数（トークン取得） | Interface |
+| `sts` | eks 系 2 関数 | Interface |
+| `s3` | s3 系 3 関数 | **Gateway** |
+| `dynamodb` | dynamodb-check | **Gateway** |
+
+`logs` は全関数に必要。見落とすとログが一切出ず、しかも関数自体は
+タイムアウトするまで気づけない。
+
+Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たない。ルート
+テーブルに関連付けられていれば到達でき、Lambda 側はプレフィックスリスト宛の
+アウトバウンドを許可する。
+
+### 追加するルール
+
+| 方向 | 対象 | 内容 |
+|---|---|---|
+| Lambda SG の egress | 各インターフェースエンドポイントの SG | 443 |
+| Lambda SG の egress | EKS クラスタの SG | 443 |
+| Lambda SG の egress | s3 / dynamodb のプレフィックスリスト | 443 |
+| エンドポイントの SG の ingress | Lambda SG | 443 |
+| **EKS クラスタ SG の ingress** | Lambda SG | 443 |
+
+最後の 1 つが要点。**これが無いと kubeconfig を生成できても API サーバへ
+到達できない。** 対象は EKS が作成するマネージド SG
+（`vpc_config[0].cluster_security_group_id`）。
 
 ## タイムアウト
 

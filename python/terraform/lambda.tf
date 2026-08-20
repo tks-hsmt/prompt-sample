@@ -165,19 +165,19 @@ resource "aws_lambda_function" "dr" {
     variables = each.value.env
   }
 
-  # EKS のプライベートエンドポイントへ到達する関数のみ VPC に配置する
-  dynamic "vpc_config" {
-    for_each = contains(local.vpc_functions, each.key) ? [1] : []
-    content {
-      subnet_ids         = var.vpc_subnet_ids
-      security_group_ids = var.vpc_security_group_ids
-    }
+  # 全関数を VPC 内に配置する。NAT ゲートウェイが無いため、AWS API へは
+  # VPC エンドポイント経由で到達する（network.tf を参照）。
+  vpc_config {
+    subnet_ids         = var.vpc_subnet_ids
+    security_group_ids = [aws_security_group.dr_lambda.id]
   }
 
   depends_on = [
     aws_iam_role_policy.dr,
     aws_iam_role_policy_attachment.basic,
     aws_iam_role_policy_attachment.vpc,
+    aws_security_group_rule.endpoint_from_dr_lambda,
+    aws_security_group_rule.eks_from_dr_lambda,
   ]
 }
 

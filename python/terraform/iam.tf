@@ -311,8 +311,8 @@ locals {
     "eks-restart-pods"    = data.aws_iam_policy_document.eks_restart_pods.json
   }
 
-  # EKS のプライベートエンドポイントへ到達するため VPC 配置が要る関数
-  vpc_functions = ["eks-check", "eks-rollout-restart"]
+  # 全関数を VPC 内に配置する方針のため、ENI の作成・削除権限も全関数に要る。
+  vpc_functions = keys(local.policies)
 }
 
 resource "aws_iam_role" "dr" {
@@ -335,7 +335,7 @@ resource "aws_iam_role_policy_attachment" "basic" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# VPC 配置する関数には ENI の作成・削除権限が要る。
+# VPC 配置する関数には ENI の作成・削除権限が要る。全関数が対象。
 resource "aws_iam_role_policy_attachment" "vpc" {
   for_each   = toset(local.vpc_functions)
   role       = aws_iam_role.dr[each.key].name

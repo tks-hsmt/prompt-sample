@@ -105,12 +105,11 @@ variable "pod_restart_function_names" {
 # --- Lambda 自体の配置 -----------------------------------------------------
 
 variable "vpc_subnet_ids" {
-  description = "EKS のプライベートエンドポイントへ到達するためのサブネット"
+  description = <<-EOT
+    Lambda を配置するサブネット。VPC エンドポイントと EKS API サーバへ
+    到達できるプライベートサブネットを指定する。
+  EOT
   type        = list(string)
-}
-
-variable "vpc_security_group_ids" {
-  type = list(string)
 }
 
 variable "alarm_prefix" {
