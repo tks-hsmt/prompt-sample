@@ -64,16 +64,46 @@ module が受け取るのは `functions`（関数名 -> 定義）とネットワ
 | `eks_cluster_security_group_ids` | クラスタ名 -> マネージド SG |
 | `name_prefix` / `rbac_group` / `gateway_endpoint_services` | 任意。既定値あり |
 
-## ARN は env で組み立てる
+## 対象リソースはリソース参照から取る
 
-`locals.tf` で名前から ARN を組み立てる。**同一 state で対象リソースを管理して
-いるなら、リソース参照から直接取ること。**
+`envs/*/locals.tf` で、同一 state のリソースを**参照から**取る。名前を直値で
+書くと、リソース名を変えたときに権限がズレる。タイプミスも plan では検出
+されず、実行時の権限エラーになるまで気づけない。
 
 ```hcl
-self_table_arns = [for t in aws_dynamodb_table.this : t.arn]
+self_table_names = [for t in aws_dynamodb_table.this : t.name]
+self_table_arns  = [for t in aws_dynamodb_table.this : t.arn]
 ```
 
-module 側で ID から組み立てる構造にすると、この書き方ができない。
+**ARN も文字列で組み立てない。** 参照から取ればフォーマットを間違える余地が
+無くなる。例外は API Gateway と EventBridge Scheduler で、管理用 ARN の属性が
+無いため組み立てが必要（API Gateway の ARN にはアカウント ID が入らず、
+コロンが 2 つ続く点に注意）。
+
+依存の順序は Terraform が解決する。`data` と違い、リソース参照なら同じ apply で
+作るリソースでも問題ない。`for_each` のキーだけは plan 時に確定している必要が
+あるが、`functions` のキーと `endpoints` の文字列はどちらも静的なので問題ない。
+
+### 置き換えが必要なリソース名
+
+以下は**仮の名前**。実際の構成に合わせて置き換えること。
+
+```
+aws_vpc.this                   aws_subnet.private
+aws_api_gateway_rest_api.this  aws_api_gateway_stage.this
+aws_scheduler_schedule_group.this
+aws_s3_bucket.this             aws_iam_role.s3_replication
+aws_iam_role.scheduler_target
+aws_lambda_function.app        aws_lambda_function.pod_restart
+aws_dynamodb_table.this        aws_efs_file_system.this
+aws_lb.this                    aws_lb_target_group.this
+aws_eks_cluster.this           （キーは "a" / "b" を仮置き）
+```
+
+`variables.tf` に残しているのは**別 state から受け取るものだけ**。相手
+リージョンのリソースと、インターフェースエンドポイントの SG。
+`terraform_remote_state` で引く場合は変数を消し、`locals.tf` で
+`data.terraform_remote_state.xxx.outputs.yyy` を参照する。
 
 ## RBAC を別 module にしている理由
 
@@ -162,28 +192,77 @@ Terraform で作る構成だと、初回 apply 時にまだ存在せず失敗す
 
 ## ネットワーク
 
-**全 Lambda を VPC 内に配置する。** NAT ゲートウェイが無いためパブリック
-インターネットへは出られず、AWS API へは VPC エンドポイント経由で到達する。
+**全 Lambda を VPC 内に配置し、関数ごとにセキュリティグループを作る。**
+NAT ゲートウェイが無いためパブリックインターネットへは出られず、AWS API へは
+VPC エンドポイント経由で到達する。
 
-### 必要な経路
+### 関数ごとに SG を分ける理由
 
-| 接続先 | 用途 | 種別 |
-|---|---|---|
-| `logs` | **全関数**のログ出力 | Interface |
-| `apigateway` | apigateway 系 3 関数 | Interface |
-| `scheduler` | scheduler 系 3 関数 | Interface |
-| `elasticloadbalancing` | nlb-check | Interface |
-| `monitoring` | cloudwatch-check | Interface |
-| `lambda` | lambda-check / eks-restart-pods | Interface |
-| `elasticfilesystem` | efs-check | Interface |
-| `eks` | eks 系 2 関数 | Interface |
-| `eks-auth` | eks 系 2 関数（トークン取得） | Interface |
-| `sts` | eks 系 2 関数 | Interface |
-| `s3` | s3 系 3 関数 | **Gateway** |
-| `dynamodb` | dynamodb-check | **Gateway** |
+**その関数が到達する先だけに egress を開く。** IAM で叩けるアクションを
+絞っていても、経路が開いていることとは別。多層防御として、ネットワーク側でも
+最小権限にする。
+
+接続先は `functions` の定義に書く。`logs` は全関数に必要なので module 側で
+自動的に付与する。
+
+```hcl
+"apigateway-block" = {
+  endpoints = ["apigateway"]          # logs は書かない
+}
+"s3-check" = {
+  gateway_endpoints = ["s3"]          # Gateway 型はプレフィックスリスト宛
+}
+"eks-check" = {
+  endpoints    = ["eks", "eks-auth", "sts"]
+  eks_clusters = local.cluster_names  # クラスタ SG への 443 とアクセスエントリ
+}
+```
+
+### 生成されるもの
+
+| 関数 | インターフェースエンドポイント | Gateway | EKS |
+|---|---|---|---|
+| apigateway-block / enable / check | logs, apigateway | | |
+| scheduler-block / enable / check | logs, scheduler | | |
+| s3-block / enable / check | logs | s3 | |
+| lambda-check | logs, lambda | | |
+| dynamodb-check | logs | dynamodb | |
+| nlb-check | logs, elasticloadbalancing | | |
+| cloudwatch-check | logs, monitoring | | |
+| efs-check | logs, elasticfilesystem | | |
+| eks-check / rollout-restart | logs, eks, eks-auth, sts | | 2 クラスタ |
+| eks-restart-pods | logs, lambda | | |
+
+SG 17 個、ルール 80 本（egress 38 + ingress 38 + Gateway egress 4）。
+
+### エンドポイントの SG はサービス名のマップで渡す
+
+エンドポイントごとに SG が分かれている前提で、関数ごとに必要な
+エンドポイントにだけ ingress を追加する。別 state で管理しているため、
+`terraform_remote_state` か tfvars で渡す。
+
+```hcl
+interface_endpoint_security_group_ids = {
+  logs                 = "sg-..."
+  apigateway           = "sg-..."
+  scheduler            = "sg-..."
+  lambda               = "sg-..."
+  elasticloadbalancing = "sg-..."
+  monitoring           = "sg-..."
+  elasticfilesystem    = "sg-..."
+  eks                  = "sg-..."
+  eks-auth             = "sg-..."
+  sts                  = "sg-..."
+}
+```
 
 `logs` は全関数に必要。見落とすとログが一切出ず、しかも関数自体は
 タイムアウトするまで気づけない。
+
+Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たない。ルート
+テーブルに関連付けられていれば到達でき、Lambda 側はプレフィックスリスト宛の
+アウトバウンドを許可する。プレフィックスリストは AWS が管理していて常に
+存在するため `data` で引いてよい。
 
 ### 閉塞系のクロスリージョンアクセス
 
@@ -195,18 +274,8 @@ Terraform で作る構成だと、初回 apply 時にまだ存在せず失敗す
 boto3 は `region_name` からホスト名を組み立てるだけなので、DNS が相手側
 VPCE のプライベート IP に解決されれば**コードの変更は不要**。
 
-### 追加するルール
-
-| 方向 | 対象 | 内容 |
-|---|---|---|
-| Lambda SG の egress | 各インターフェースエンドポイントの SG | 443 |
-| Lambda SG の egress | EKS クラスタの SG | 443 |
-| Lambda SG の egress | s3 / dynamodb のプレフィックスリスト | 443 |
-| エンドポイントの SG の ingress | Lambda SG | 443 |
-| **EKS クラスタ SG の ingress** | Lambda SG | 443 |
-
-最後の 1 つが要点。**これが無いと kubeconfig を生成できても API サーバへ
-到達できない。**
+この場合、`interface_endpoint_security_group_ids` に渡すのは**相手リージョン側
+エンドポイントの SG** になる。
 
 ## Kubernetes RBAC
 

@@ -20,10 +20,11 @@ locals {
     # --- API Gateway -------------------------------------------------------
     "apigateway-block" = {
       handler = "dr_switch.apigateway.handlers.block"
+      endpoints = ["apigateway"]
       env = {
         REGION      = local.peer_region
-        REST_API_ID = local.peer_api.id
-        STAGE       = local.peer_api.stage
+        REST_API_ID = local.peer_rest_api_id
+        STAGE       = local.peer_stage_name
       }
       policy = [{
         actions   = ["apigateway:GET", "apigateway:PATCH"]
@@ -33,10 +34,11 @@ locals {
 
     "apigateway-enable" = {
       handler = "dr_switch.apigateway.handlers.enable"
+      endpoints = ["apigateway"]
       env = {
         REGION         = local.self_region
-        REST_API_ID    = local.self_api.id
-        STAGE          = local.self_api.stage
+        REST_API_ID    = local.self_rest_api_id
+        STAGE          = local.self_stage_name
         THROTTLE_RATE  = "10000"
         THROTTLE_BURST = "5000"
       }
@@ -49,10 +51,11 @@ locals {
     # get-rest-api（apiStatus）と get-stage（スロットリング値）で対象が違う
     "apigateway-check" = {
       handler = "dr_switch.apigateway.handlers.check"
+      endpoints = ["apigateway"]
       env = {
         REGION         = local.self_region
-        REST_API_ID    = local.self_api.id
-        STAGE          = local.self_api.stage
+        REST_API_ID    = local.self_rest_api_id
+        STAGE          = local.self_stage_name
         THROTTLE_RATE  = "10000"
         THROTTLE_BURST = "5000"
       }
@@ -67,7 +70,8 @@ locals {
     # iam:PassRole が必須。他のどの関数にも不要な権限なので見落としやすい。
     "scheduler-block" = {
       handler = "dr_switch.scheduler.handlers.block"
-      env     = { REGION = local.peer_region, SCHEDULE_GROUP = local.peer_group }
+      endpoints = ["scheduler"]
+      env     = { REGION = local.peer_region, SCHEDULE_GROUP = local.peer_schedule_group }
       policy = [
         {
           actions   = ["scheduler:ListSchedules", "scheduler:GetSchedule", "scheduler:UpdateSchedule"]
@@ -75,7 +79,7 @@ locals {
         },
         {
           actions           = ["iam:PassRole"]
-          resources         = [var.peer_schedule_role_arn]
+          resources         = [local.peer_schedule_role_arn]
           pass_role_service = "scheduler.amazonaws.com"
         },
       ]
@@ -83,7 +87,8 @@ locals {
 
     "scheduler-enable" = {
       handler = "dr_switch.scheduler.handlers.enable"
-      env     = { REGION = local.self_region, SCHEDULE_GROUP = local.self_group }
+      endpoints = ["scheduler"]
+      env     = { REGION = local.self_region, SCHEDULE_GROUP = local.self_schedule_group }
       policy = [
         {
           actions   = ["scheduler:ListSchedules", "scheduler:GetSchedule", "scheduler:UpdateSchedule"]
@@ -91,7 +96,7 @@ locals {
         },
         {
           actions           = ["iam:PassRole"]
-          resources         = [var.self_schedule_role_arn]
+          resources         = [local.self_schedule_role_arn]
           pass_role_service = "scheduler.amazonaws.com"
         },
       ]
@@ -99,7 +104,8 @@ locals {
 
     "scheduler-check" = {
       handler = "dr_switch.scheduler.handlers.check"
-      env     = { REGION = local.self_region, SCHEDULE_GROUP = local.self_group }
+      endpoints = ["scheduler"]
+      env     = { REGION = local.self_region, SCHEDULE_GROUP = local.self_schedule_group }
       policy = [
         {
           actions   = ["scheduler:GetScheduleGroup"]
@@ -117,6 +123,7 @@ locals {
     # バケットは SSE-S3（AES256）なので KMS 関連の権限は不要。
     "s3-block" = {
       handler = "dr_switch.s3.handlers.block"
+      gateway_endpoints = ["s3"]
       env = {
         REGION              = local.peer_region
         REPLICATION_BUCKETS = jsonencode(local.peer_buckets)
@@ -128,7 +135,7 @@ locals {
         },
         {
           actions           = ["iam:PassRole"]
-          resources         = [var.peer_replication_role_arn]
+          resources         = [local.peer_replication_role_arn]
           pass_role_service = "s3.amazonaws.com"
         },
       ]
@@ -136,6 +143,7 @@ locals {
 
     "s3-enable" = {
       handler = "dr_switch.s3.handlers.enable"
+      gateway_endpoints = ["s3"]
       env = {
         REGION              = local.self_region
         REPLICATION_BUCKETS = jsonencode(local.self_buckets)
@@ -147,7 +155,7 @@ locals {
         },
         {
           actions           = ["iam:PassRole"]
-          resources         = [var.self_replication_role_arn]
+          resources         = [local.self_replication_role_arn]
           pass_role_service = "s3.amazonaws.com"
         },
       ]
@@ -155,6 +163,7 @@ locals {
 
     "s3-check" = {
       handler = "dr_switch.s3.handlers.check"
+      gateway_endpoints = ["s3"]
       env = {
         REGION              = local.self_region
         REPLICATION_BUCKETS = jsonencode(local.self_buckets)
@@ -169,6 +178,7 @@ locals {
     # GetFunction ではなく GetFunctionConfiguration。応答が軽く権限も狭い
     "lambda-check" = {
       handler = "dr_switch.lambda_function.handlers.check"
+      endpoints = ["lambda"]
       env = {
         REGION         = local.self_region
         FUNCTION_NAMES = jsonencode(local.self_function_names)
@@ -181,6 +191,7 @@ locals {
 
     "dynamodb-check" = {
       handler = "dr_switch.dynamodb.handlers.check"
+      gateway_endpoints = ["dynamodb"]
       env     = { REGION = local.self_region, TABLE_NAMES = jsonencode(local.self_table_names) }
       policy = [{
         actions   = ["dynamodb:DescribeTable"]
@@ -194,10 +205,11 @@ locals {
     # Describe 系だけ "*"、RegisterTargets 等は ARN 指定になっている。
     "nlb-check" = {
       handler = "dr_switch.nlb.handlers.check"
+      endpoints = ["elasticloadbalancing"]
       env = {
         REGION             = local.self_region
-        TARGET_GROUP_ARNS  = jsonencode(var.self_target_group_arns)
-        LOAD_BALANCER_ARNS = jsonencode(var.self_load_balancer_arns)
+        TARGET_GROUP_ARNS  = jsonencode(local.self_target_group_arns)
+        LOAD_BALANCER_ARNS = jsonencode(local.self_load_balancer_arns)
       }
       policy = [{
         actions = [
@@ -210,6 +222,7 @@ locals {
 
     "cloudwatch-check" = {
       handler = "dr_switch.cloudwatch.handlers.check"
+      endpoints = ["monitoring"]
       env     = { REGION = local.self_region, ALARM_PREFIX = local.alarm_prefix }
       policy = [{
         actions   = ["cloudwatch:DescribeAlarms"]
@@ -220,6 +233,7 @@ locals {
     # --- EFS ---------------------------------------------------------------
     "efs-check" = {
       handler = "dr_switch.efs.handlers.check"
+      endpoints = ["elasticfilesystem"]
       env = {
         REGION          = local.self_region
         FILE_SYSTEM_IDS = jsonencode(local.self_file_system_ids)
@@ -238,21 +252,24 @@ locals {
     # IAM 側は kubeconfig 生成に必要な分だけ。
     "eks-check" = {
       handler = "dr_switch.eks.handlers.check"
+      endpoints = ["eks", "eks-auth", "sts"]
+      eks_clusters = local.cluster_names
       env     = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
-      eks     = true
       policy  = local.eks_access_policy
     }
 
     "eks-rollout-restart" = {
       handler = "dr_switch.eks.handlers.rollout_restart"
+      endpoints = ["eks", "eks-auth", "sts"]
+      eks_clusters = local.cluster_names
       env     = { REGION = local.self_region, EKS_CLUSTERS = jsonencode(local.eks_clusters_env) }
-      eks     = true
       policy  = local.eks_access_policy
     }
 
     # 呼ばれる側は Pod の起動完了を待つため、その Timeout を上回る値にする
     "eks-restart-pods" = {
       handler = "dr_switch.eks.handlers.restart_pods"
+      endpoints = ["lambda"]
       env = {
         REGION                = local.self_region
         POD_RESTART_FUNCTIONS = jsonencode(local.pod_restart_function_names)

@@ -13,10 +13,10 @@ module "dr_switch" {
   region    = local.self_region
   image_uri = var.image_uri
 
-  vpc_id                                = var.vpc_id
-  vpc_subnet_ids                        = var.vpc_subnet_ids
-  interface_endpoint_security_group_ids = var.interface_endpoint_security_group_ids
-  eks_cluster_security_group_ids         = var.eks_cluster_security_group_ids
+  vpc_id                                = aws_vpc.this.id
+  vpc_subnet_ids                        = [for s in aws_subnet.private : s.id]
+  interface_endpoint_security_group_ids = local.interface_endpoint_security_group_ids
+  eks_cluster_security_group_ids        = local.eks_cluster_security_group_ids
 }
 
 # --- Kubernetes RBAC（クラスタごとに 1 回） ---------------------------------
@@ -27,7 +27,7 @@ module "rbac_cluster_a" {
   source    = "../../modules/dr-switch-rbac"
   providers = { kubernetes = kubernetes.cluster_a }
 
-  namespaces = [for n in local.clusters["osaka-cluster-a"] : n.name]
+  namespaces = [for n in local.clusters[aws_eks_cluster.this["a"].name] : n.name]
   rbac_group = module.dr_switch.rbac_group
 }
 
@@ -35,7 +35,7 @@ module "rbac_cluster_b" {
   source    = "../../modules/dr-switch-rbac"
   providers = { kubernetes = kubernetes.cluster_b }
 
-  namespaces = [for n in local.clusters["osaka-cluster-b"] : n.name]
+  namespaces = [for n in local.clusters[aws_eks_cluster.this["b"].name] : n.name]
   rbac_group = module.dr_switch.rbac_group
 }
 

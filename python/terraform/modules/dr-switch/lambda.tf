@@ -29,7 +29,7 @@ resource "aws_lambda_function" "dr" {
     for_each = each.value.vpc ? [1] : []
     content {
       subnet_ids         = var.vpc_subnet_ids
-      security_group_ids = [aws_security_group.dr_lambda.id]
+      security_group_ids = [aws_security_group.dr_lambda[each.key].id]
     }
   }
 
@@ -37,7 +37,10 @@ resource "aws_lambda_function" "dr" {
     aws_iam_role_policy.dr,
     aws_iam_role_policy_attachment.basic,
     aws_iam_role_policy_attachment.vpc,
+    aws_security_group_rule.egress_endpoint,
     aws_security_group_rule.endpoint_from_dr_lambda,
+    aws_security_group_rule.egress_gateway,
+    aws_security_group_rule.egress_eks,
     aws_security_group_rule.eks_from_dr_lambda,
   ]
 }

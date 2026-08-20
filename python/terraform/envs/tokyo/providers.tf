@@ -15,24 +15,24 @@ provider "aws" {
 
 # Kubernetes provider はクラスタごとに 1 インスタンス必要。
 # module 内では for_each で切り替えられないため、ここで alias を切る。
-data "aws_eks_cluster_auth" "cluster_a" {
-  name = "tokyo-cluster-a"
+#
+# ★ aws_eks_cluster.this のキー（"a" / "b"）は仮。実際の構成に合わせること。
+
+data "aws_eks_cluster_auth" "this" {
+  for_each = aws_eks_cluster.this
+  name     = each.value.name
 }
 
 provider "kubernetes" {
   alias                  = "cluster_a"
-  host                   = var.cluster_a_endpoint
-  cluster_ca_certificate = base64decode(var.cluster_a_ca_data)
-  token                  = data.aws_eks_cluster_auth.cluster_a.token
-}
-
-data "aws_eks_cluster_auth" "cluster_b" {
-  name = "tokyo-cluster-b"
+  host                   = aws_eks_cluster.this["a"].endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.this["a"].certificate_authority[0].data)
+  token                  = data.aws_eks_cluster_auth.this["a"].token
 }
 
 provider "kubernetes" {
   alias                  = "cluster_b"
-  host                   = var.cluster_b_endpoint
-  cluster_ca_certificate = base64decode(var.cluster_b_ca_data)
-  token                  = data.aws_eks_cluster_auth.cluster_b.token
+  host                   = aws_eks_cluster.this["b"].endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.this["b"].certificate_authority[0].data)
+  token                  = data.aws_eks_cluster_auth.this["b"].token
 }

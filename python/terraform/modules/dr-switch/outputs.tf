@@ -8,8 +8,9 @@ output "role_arns" {
   value       = { for k, r in aws_iam_role.dr : k => r.arn }
 }
 
-output "lambda_security_group_id" {
-  value = aws_security_group.dr_lambda.id
+output "security_group_ids" {
+  description = "関数名 -> セキュリティグループ"
+  value       = { for k, s in aws_security_group.dr_lambda : k => s.id }
 }
 
 output "rbac_group" {

@@ -13,6 +13,10 @@
 #
 # check は list のみ、rollout_restart は patch を別 Role で付与する。
 # Node（クラスタスコープ）を確認しない設計なので ClusterRoleBinding は不要。
+#
+# リソースタイプはバージョンサフィックス付き（kubernetes_role_v1 等）を使う。
+# provider の推奨であり、サフィックス無しからの moved は「リソースタイプが
+# 異なる」として拒否されるため、後から変えられない。
 # ============================================================================
 
 terraform {
@@ -23,7 +27,7 @@ terraform {
   }
 }
 
-resource "kubernetes_role" "reader" {
+resource "kubernetes_role_v1" "reader" {
   for_each = toset(var.namespaces)
 
   metadata {
@@ -43,7 +47,7 @@ resource "kubernetes_role" "reader" {
   }
 }
 
-resource "kubernetes_role" "restarter" {
+resource "kubernetes_role_v1" "restarter" {
   for_each = toset(var.namespaces)
 
   metadata {
@@ -58,7 +62,7 @@ resource "kubernetes_role" "restarter" {
   }
 }
 
-resource "kubernetes_role_binding" "reader" {
+resource "kubernetes_role_binding_v1" "reader" {
   for_each = toset(var.namespaces)
 
   metadata {
@@ -68,7 +72,7 @@ resource "kubernetes_role_binding" "reader" {
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
-    name      = kubernetes_role.reader[each.key].metadata[0].name
+    name      = kubernetes_role_v1.reader[each.key].metadata[0].name
   }
   subject {
     api_group = "rbac.authorization.k8s.io"
@@ -77,7 +81,7 @@ resource "kubernetes_role_binding" "reader" {
   }
 }
 
-resource "kubernetes_role_binding" "restarter" {
+resource "kubernetes_role_binding_v1" "restarter" {
   for_each = toset(var.namespaces)
 
   metadata {
@@ -87,7 +91,7 @@ resource "kubernetes_role_binding" "restarter" {
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
-    name      = kubernetes_role.restarter[each.key].metadata[0].name
+    name      = kubernetes_role_v1.restarter[each.key].metadata[0].name
   }
   subject {
     api_group = "rbac.authorization.k8s.io"
