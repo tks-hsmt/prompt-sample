@@ -1,20 +1,19 @@
 # ============================================================================
 # Lambda 関数
 #
-# ここも local.functions を for_each で回すだけ。全関数が同一のコンテナ
-# イメージを共有し、image_config.command でハンドラを切り替える。Lambda は
-# イメージをダイジェスト単位でキャッシュするため、共有すると最初の 1 本が
-# キャッシュを温め残りがその恩恵を受ける。
+# 全関数が同一のコンテナイメージを共有し、image_config.command でハンドラを
+# 切り替える。Lambda はイメージをダイジェスト単位でキャッシュするため、
+# 共有すると最初の 1 本がキャッシュを温め残りがその恩恵を受ける。
 # ============================================================================
 
 resource "aws_lambda_function" "dr" {
-  for_each = local.functions
+  for_each = var.functions
 
-  function_name = "dr-${each.key}"
+  function_name = "${var.name_prefix}${each.key}"
   role          = aws_iam_role.dr[each.key].arn
   package_type  = "Image"
   image_uri     = var.image_uri
-  timeout       = lookup(each.value, "timeout", local.default_timeout)
+  timeout       = each.value.timeout
 
   image_config {
     command = [each.value.handler]
@@ -27,7 +26,7 @@ resource "aws_lambda_function" "dr" {
   # NAT ゲートウェイが無いため、AWS API へは VPC エンドポイント経由で到達する
   # （network.tf を参照）。
   dynamic "vpc_config" {
-    for_each = lookup(each.value, "vpc", true) ? [1] : []
+    for_each = each.value.vpc ? [1] : []
     content {
       subnet_ids         = var.vpc_subnet_ids
       security_group_ids = [aws_security_group.dr_lambda.id]

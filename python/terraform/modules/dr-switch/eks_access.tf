@@ -1,8 +1,8 @@
 # ============================================================================
 # EKS アクセスエントリ
 #
-# IAM ロールを Kubernetes のグループにマッピングする。マネージドのアクセス
-# ポリシー（AmazonEKSViewPolicy）は使わない。
+# eks = true の関数のロールを Kubernetes のグループにマッピングする。
+# マネージドのアクセスポリシー（AmazonEKSViewPolicy）は使わない。
 #   - cluster スコープ … 全 namespace の全リソースが読めてしまい広すぎる
 #   - namespace スコープ … 必要な権限を過不足なく表現できない
 #
@@ -13,8 +13,10 @@
 
 resource "aws_eks_access_entry" "dr" {
   for_each = {
-    for pair in setproduct([for c in var.eks_clusters : c.name], local.eks_functions) :
-    "${pair[0]}/${pair[1]}" => { cluster = pair[0], fn = pair[1] }
+    for pair in setproduct(
+      keys(var.eks_cluster_security_group_ids),
+      [for k, v in var.functions : k if v.eks]
+    ) : "${pair[0]}/${pair[1]}" => { cluster = pair[0], fn = pair[1] }
   }
 
   cluster_name      = each.value.cluster

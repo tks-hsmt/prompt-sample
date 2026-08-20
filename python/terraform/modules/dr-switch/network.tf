@@ -29,12 +29,12 @@
 # --- Lambda 用セキュリティグループ ------------------------------------------
 
 resource "aws_security_group" "dr_lambda" {
-  name        = "dr-switch-lambda"
+  name        = "${var.name_prefix}lambda"
   description = "DR switch Lambda functions"
   vpc_id      = var.vpc_id
 
   tags = {
-    Name = "dr-switch-lambda"
+    Name = "${var.name_prefix}lambda"
   }
 }
 
@@ -73,12 +73,12 @@ resource "aws_security_group_rule" "dr_lambda_egress_eks" {
 # プレフィックスリストは AWS が管理していて常に存在するため data で引いてよい。
 # 自チームが作成するリソースではないので、初回 apply でも失敗しない。
 data "aws_ec2_managed_prefix_list" "gateway" {
-  for_each = toset(["s3", "dynamodb"])
-  name     = "com.amazonaws.${var.self_region}.${each.key}"
+  for_each = toset(var.gateway_endpoint_services)
+  name     = "com.amazonaws.${var.region}.${each.key}"
 }
 
 resource "aws_security_group_rule" "dr_lambda_egress_gateway" {
-  for_each = toset(["s3", "dynamodb"])
+  for_each = toset(var.gateway_endpoint_services)
 
   type              = "egress"
   from_port         = 443

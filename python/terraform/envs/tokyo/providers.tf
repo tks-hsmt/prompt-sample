@@ -16,7 +16,7 @@ provider "aws" {
 # Kubernetes provider はクラスタごとに 1 インスタンス必要。
 # module 内では for_each で切り替えられないため、ここで alias を切る。
 data "aws_eks_cluster_auth" "cluster_a" {
-  name = local.cluster_a
+  name = "tokyo-cluster-a"
 }
 
 provider "kubernetes" {
@@ -27,7 +27,7 @@ provider "kubernetes" {
 }
 
 data "aws_eks_cluster_auth" "cluster_b" {
-  name = local.cluster_b
+  name = "tokyo-cluster-b"
 }
 
 provider "kubernetes" {

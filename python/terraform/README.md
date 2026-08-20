@@ -5,44 +5,75 @@
 ```
 terraform/
   modules/
-    dr-switch/          IAM・Lambda・ネットワーク・EKS アクセスエントリ
-      functions.tf      ★ 関数ごとの handler / env / policy
-      variables.tf      module の入力
-      arns.tf           変数から ARN を組み立てる
-      iam.tf            ロールとポリシー（for_each）
-      lambda.tf         関数定義（for_each）
-      network.tf        セキュリティグループ
-      eks_access.tf     EKS アクセスエントリ
+    dr-switch/        入力に従ってリソースを作るだけ。環境依存なし
+      variables.tf    functions / network の入力
+      iam.tf          ロールとポリシー（for_each）
+      lambda.tf       関数定義（for_each）
+      network.tf      セキュリティグループ
+      eks_access.tf   EKS アクセスエントリ
       outputs.tf
-    dr-switch-rbac/     Kubernetes RBAC（1 クラスタ分）
+    dr-switch-rbac/   Kubernetes RBAC（1 クラスタ分）
   envs/
-    tokyo/              ACTIVE 側。閉塞対象は大阪
-    osaka/              STANDBY 側。閉塞対象は東京
+    tokyo/            ACTIVE 側。閉塞対象は大阪
+      functions.tf    ★ 対象 Lambda の定義（追加・変更はここだけ）
+      locals.tf       対象リソースの識別子と ARN
+      main.tf         module 呼び出し
+      providers.tf    AWS / Kubernetes provider
+      variables.tf    別 state から受け取る値
+    osaka/            STANDBY 側。閉塞対象は東京
 ```
 
-`envs/*` は値を注入するだけで、リソースは `modules/*` が入力に従って作る。
+## Lambda を追加・変更するとき
 
-## 関数を追加・変更するとき
-
-**`modules/dr-switch/functions.tf` の `local.functions` にエントリを 1 つ
-足すだけでよい。** ロール・ポリシー・関数定義はすべて `for_each` が生成する
-ので、`resource` を定義しているファイルには手を入れない。
+**`envs/*/functions.tf` の `local.functions` にエントリを 1 つ足すだけでよい。**
+module 配下には手を入れない。
 
 ```hcl
 "新しい関数名" = {
   handler = "dr_switch.xxx.handlers.yyy"
-  env     = { REGION = var.self_region, ... }
+  env     = { REGION = local.self_region, ... }
   policy = [{
     actions   = ["service:Action"]
     resources = [local.xxx_arn]
   }]
-  # timeout = 120   任意。既定は local.default_timeout（60 秒）
-  # vpc     = false 任意。既定は true（全関数を VPC 内に配置する方針）
+  # timeout = 120   任意。既定 60 秒
+  # vpc     = false 任意。既定 true（全関数を VPC 内に配置する方針）
+  # eks     = true  任意。既定 false。EKS アクセスエントリを作る
 }
 ```
 
+対象リソースが増えるときは `locals.tf` に名前と ARN の組み立てを足す。
+どちらも env 側で完結する。
+
 `policy` のステートメントに `pass_role_service` を付けると、`iam:PassRole` の
 渡し先を限定する condition が生成される。
+
+## module の責務
+
+module が受け取るのは `functions`（関数名 -> 定義）とネットワークの設定だけ。
+**関数名も環境固有の値も持たない**ので、対象が増えても module の変数は
+変わらない。
+
+| module の入力 | 内容 |
+|---|---|
+| `functions` | 関数名 -> `{ handler, env, policy, timeout, vpc, eks }` |
+| `region` | プレフィックスリストの解決に使う |
+| `image_uri` | ECR のイメージ URI |
+| `vpc_id` / `vpc_subnet_ids` | Lambda の配置先 |
+| `interface_endpoint_security_group_ids` | 許可を追加するエンドポイントの SG |
+| `eks_cluster_security_group_ids` | クラスタ名 -> マネージド SG |
+| `name_prefix` / `rbac_group` / `gateway_endpoint_services` | 任意。既定値あり |
+
+## ARN は env で組み立てる
+
+`locals.tf` で名前から ARN を組み立てる。**同一 state で対象リソースを管理して
+いるなら、リソース参照から直接取ること。**
+
+```hcl
+self_table_arns = [for t in aws_dynamodb_table.this : t.arn]
+```
+
+module 側で ID から組み立てる構造にすると、この書き方ができない。
 
 ## RBAC を別 module にしている理由
 
@@ -54,13 +85,13 @@ terraform/
 module "rbac_cluster_a" {
   source     = "../../modules/dr-switch-rbac"
   providers  = { kubernetes = kubernetes.cluster_a }
-  namespaces = module.dr_switch.cluster_namespaces["tokyo-cluster-a"]
+  namespaces = [for n in local.clusters["tokyo-cluster-a"] : n.name]
   rbac_group = module.dr_switch.rbac_group
 }
 ```
 
 アクセスエントリ（`aws_eks_access_entry`）は AWS provider なので本体 module に
-残している。
+残している。`eks = true` の関数だけが対象になる。
 
 ## 権限の一覧
 
