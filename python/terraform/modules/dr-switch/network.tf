@@ -23,6 +23,9 @@ locals {
 
   # (関数, エンドポイント, SG) の組。エンドポイントに SG が複数付いていても
   # すべてに対してルールを作る。
+  #
+  # サービス名のキーが無ければ、その関数が使うエンドポイントが渡されていない。
+  # 設定漏れなので lookup で握りつぶさず、明示的に失敗させる。
   endpoint_rules = merge([
     for fn, services in local.function_endpoints : merge([
       for svc in services : {
@@ -39,6 +42,8 @@ locals {
   ]...)
 
   # 関数 -> 到達する EKS クラスタ。SG ルールとアクセスエントリのキーになる。
+  # eks_cluster_security_group_ids にキーが無いクラスタは、まだ構築されて
+  # いないか別 state を参照できない状態。ルールを作らずに飛ばす。
   eks_rules = merge([
     for fn, v in local.vpc_functions : {
       for a in v.eks_access : "${fn}/${a.cluster}" => {
@@ -46,7 +51,7 @@ locals {
         cluster    = a.cluster
         policy     = a.policy
         namespaces = a.namespaces
-      }
+      } if contains(keys(var.eks_cluster_security_group_ids), a.cluster)
     }
   ]...)
 
@@ -142,7 +147,8 @@ resource "aws_security_group_rule" "egress_gateway" {
 # 相手リージョンの state が管理する。ここでは作れない。
 
 resource "aws_security_group_rule" "egress_peer_endpoint" {
-  for_each = local.peer_endpoint_functions
+  # CIDR が渡されていなければ相手リージョンが未構築。ルールを作らない。
+  for_each = length(var.peer_endpoint_cidr_blocks) > 0 ? local.peer_endpoint_functions : {}
 
   type              = "egress"
   from_port         = 443

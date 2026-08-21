@@ -16,24 +16,10 @@
 # ============================================================================
 
 locals {
-  functions = {
+  # 相手リージョンに依存しない関数。常に作れる。
+  base_functions = {
     # --- API Gateway -------------------------------------------------------
     # 相手リージョンの API を叩くため、到達先も相手リージョンの
-    # エンドポイントになる（VPC Peering + Resolver 経由）。
-    "apigateway-block" = {
-      handler        = "dr_switch.apigateway.handlers.block"
-      peer_endpoints = ["apigateway"]
-      env = {
-        REGION      = local.peer_region
-        REST_API_ID = local.peer_rest_api_id
-        STAGE       = local.peer_stage_name
-      }
-      policy = [{
-        actions   = ["apigateway:GET", "apigateway:PATCH"]
-        resources = [local.peer_stage_arn]
-      }]
-    }
-
     "apigateway-enable" = {
       handler = "dr_switch.apigateway.handlers.enable"
       endpoints = ["apigateway"]
@@ -69,24 +55,6 @@ locals {
 
     # --- EventBridge Scheduler ---------------------------------------------
     # UpdateSchedule は Target.RoleArn を含む全パラメータを要求するため
-    # iam:PassRole が必須。他のどの関数にも不要な権限なので見落としやすい。
-    "scheduler-block" = {
-      handler        = "dr_switch.scheduler.handlers.block"
-      peer_endpoints = ["scheduler"]
-      env     = { REGION = local.peer_region, SCHEDULE_GROUP = local.peer_schedule_group }
-      policy = [
-        {
-          actions   = ["scheduler:ListSchedules", "scheduler:GetSchedule", "scheduler:UpdateSchedule"]
-          resources = [local.peer_schedule_arn]
-        },
-        {
-          actions           = ["iam:PassRole"]
-          resources         = [local.peer_schedule_role_arn]
-          pass_role_service = "scheduler.amazonaws.com"
-        },
-      ]
-    }
-
     "scheduler-enable" = {
       handler = "dr_switch.scheduler.handlers.enable"
       endpoints = ["scheduler"]
@@ -124,27 +92,6 @@ locals {
     # 案 A（切替時にトグル）を採る場合のみ block / enable をデプロイする。
     # バケットは SSE-S3（AES256）なので KMS 関連の権限は不要。
     # Gateway 型は同一リージョンにしかルーティングしない。相手リージョンの
-    # S3 へは Interface エンドポイント経由で到達する。
-    "s3-block" = {
-      handler        = "dr_switch.s3.handlers.block"
-      peer_endpoints = ["s3"]
-      env = {
-        REGION              = local.peer_region
-        REPLICATION_BUCKETS = jsonencode(local.peer_buckets)
-      }
-      policy = [
-        {
-          actions   = ["s3:GetReplicationConfiguration", "s3:PutReplicationConfiguration"]
-          resources = local.peer_bucket_arns
-        },
-        {
-          actions           = ["iam:PassRole"]
-          resources         = [local.peer_replication_role_arn]
-          pass_role_service = "s3.amazonaws.com"
-        },
-      ]
-    }
-
     "s3-enable" = {
       handler = "dr_switch.s3.handlers.enable"
       gateway_endpoints = ["s3"]
@@ -288,6 +235,71 @@ locals {
       }]
     }
   }
+
+  # 相手リージョンに依存する関数（閉塞系）。
+  # peer_ready = false のときは作らない。相手の ID / ARN が取れないため。
+  block_functions = {
+
+    # エンドポイントになる（VPC Peering + Resolver 経由）。
+    "apigateway-block" = {
+      handler        = "dr_switch.apigateway.handlers.block"
+      peer_endpoints = ["apigateway"]
+      env = {
+        REGION      = local.peer_region
+        REST_API_ID = local.peer_rest_api_id
+        STAGE       = local.peer_stage_name
+      }
+      policy = [{
+        actions   = ["apigateway:GET", "apigateway:PATCH"]
+        resources = [local.peer_stage_arn]
+      }]
+    }
+
+    # iam:PassRole が必須。他のどの関数にも不要な権限なので見落としやすい。
+    "scheduler-block" = {
+      handler        = "dr_switch.scheduler.handlers.block"
+      peer_endpoints = ["scheduler"]
+      env     = { REGION = local.peer_region, SCHEDULE_GROUP = local.peer_schedule_group }
+      policy = [
+        {
+          actions   = ["scheduler:ListSchedules", "scheduler:GetSchedule", "scheduler:UpdateSchedule"]
+          resources = [local.peer_schedule_arn]
+        },
+        {
+          actions           = ["iam:PassRole"]
+          resources         = [local.peer_schedule_role_arn]
+          pass_role_service = "scheduler.amazonaws.com"
+        },
+      ]
+    }
+
+    # S3 へは Interface エンドポイント経由で到達する。
+    "s3-block" = {
+      handler        = "dr_switch.s3.handlers.block"
+      peer_endpoints = ["s3"]
+      env = {
+        REGION              = local.peer_region
+        REPLICATION_BUCKETS = jsonencode(local.peer_buckets)
+      }
+      policy = [
+        {
+          actions   = ["s3:GetReplicationConfiguration", "s3:PutReplicationConfiguration"]
+          resources = local.peer_bucket_arns
+        },
+        {
+          actions           = ["iam:PassRole"]
+          resources         = [local.peer_replication_role_arn]
+          pass_role_service = "s3.amazonaws.com"
+        },
+      ]
+    }
+  }
+
+  # module へ渡す最終形
+  functions = merge(
+    local.base_functions,
+    var.peer_ready ? local.block_functions : {},
+  )
 
   # eks-check と eks-rollout-restart で共通の IAM ポリシー
   eks_iam_policy = [

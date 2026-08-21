@@ -22,6 +22,42 @@ terraform/
     osaka/            STANDBY 側。閉塞対象は東京
 ```
 
+## 段階的な構築
+
+依存先の構築状況で 3 段階に分かれる。**未構築でも plan / apply が通る**よう、
+`data` ブロックごと `count` で制御する。`try()` では防げない（state ファイルが
+読めない時点で失敗するため）。
+
+| 段階 | フラグ | 作られるもの |
+|---|---|---|
+| **1** | すべて `false` | Lambda 14 本・ロール・SG・エンドポイント向けルール |
+| **2** | `external_eks_ready = true` | ＋別 state の EKS クラスタも確認・再起動の対象に |
+| **3** | `peer_ready = true` | ＋閉塞系 3 本と相手リージョン向け egress |
+
+**VPC エンドポイントは環境チームが先に作るため、常に存在する前提**でよい。
+フラグを設けず `data` で引く。サービス名のキーが渡されていなければ設定漏れ
+なので、`lookup` で握りつぶさず明示的に失敗させる。
+
+### 段階 3 は両リージョンが揃ってから
+
+東京と大阪が**互いの state を参照する**ので循環する。初回は両方 `false` で
+構築し、双方が揃ってから `true` にして再適用する。
+
+| 関数 | 段階 |
+|---|---|
+| `apigateway-enable` / `check`、`scheduler-enable` / `check`、`s3-enable` / `check` | 1 |
+| `lambda-check`、`dynamodb-check`、`nlb-check`、`cloudwatch-check`、`efs-check` | 1 |
+| `eks-check`、`eks-rollout-restart`、`eks-restart-pods` | 1 |
+| **`apigateway-block`、`scheduler-block`、`s3-block`** | **3** |
+
+### 未構築時の module の挙動
+
+- `eks_cluster_security_group_ids` にキーが無いクラスタは、アクセスエントリも SG ルールも作らない
+- `peer_endpoint_cidr_blocks` が空なら、相手リージョン向け egress を作らない
+
+module に `count` は不要。渡された `functions` の分だけ作るので、閉塞系を
+除けばそれだけ作られない。
+
 ## Lambda を追加・変更するとき
 
 **`envs/*/functions.tf` の `local.functions` にエントリを 1 つ足すだけでよい。**
