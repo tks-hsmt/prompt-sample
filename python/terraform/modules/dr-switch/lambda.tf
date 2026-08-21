@@ -40,6 +40,7 @@ resource "aws_lambda_function" "dr" {
     aws_security_group_rule.egress_endpoint,
     aws_security_group_rule.endpoint_from_dr_lambda,
     aws_security_group_rule.egress_gateway,
+    aws_security_group_rule.egress_peer_endpoint,
     aws_security_group_rule.egress_eks,
     aws_security_group_rule.eks_from_dr_lambda,
   ]

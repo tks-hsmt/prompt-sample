@@ -142,6 +142,13 @@ locals {
     for k, e in data.aws_vpc_endpoint.interface : k => e.security_group_ids
   }
 
+  # --- 相手リージョンのエンドポイント（閉塞系が使う） -----------------------
+  # リージョン間 VPC ピアリングでは相手 SG を参照できないため CIDR で指定する。
+  # 相手側エンドポイント SG への ingress（自 VPC CIDR からの 443）は
+  # 相手リージョンの state が管理する。
+
+  peer_endpoint_cidr_blocks = data.terraform_remote_state.peer.outputs.endpoint_subnet_cidrs
+
   # --- その他 --------------------------------------------------------------
 
   alarm_prefix = "gems-ip-"

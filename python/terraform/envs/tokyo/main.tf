@@ -16,6 +16,7 @@ module "dr_switch" {
   vpc_subnet_ids                        = [for s in aws_subnet.private : s.id]
   interface_endpoint_security_group_ids = local.interface_endpoint_security_group_ids
   eks_cluster_security_group_ids        = local.eks_cluster_security_group_ids
+  peer_endpoint_cidr_blocks             = local.peer_endpoint_cidr_blocks
 }
 
 output "function_arns" {

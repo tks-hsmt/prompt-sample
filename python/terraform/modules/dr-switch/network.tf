@@ -53,6 +53,12 @@ locals {
   gateway_services = distinct(flatten([
     for v in local.vpc_functions : v.gateway_endpoints
   ]))
+
+  # 相手リージョンのエンドポイントを使う関数。
+  # リージョン間 VPC ピアリングでは相手 SG を参照できないため CIDR で書く。
+  peer_endpoint_functions = {
+    for k, v in local.vpc_functions : k => v if length(v.peer_endpoints) > 0
+  }
 }
 
 # --- 関数ごとのセキュリティグループ -----------------------------------------
@@ -118,6 +124,33 @@ resource "aws_security_group_rule" "egress_gateway" {
   security_group_id = aws_security_group.dr_lambda[each.value.fn].id
   prefix_list_ids   = [data.aws_ec2_managed_prefix_list.gateway[each.value.service].id]
   description       = "to ${each.value.service} gateway endpoint"
+}
+
+# --- 相手リージョンのエンドポイントへの経路 ---------------------------------
+# 閉塞系（block）は相手リージョンの API を叩く。クロスリージョン PrivateLink は
+# apigateway / scheduler に未対応のため、相手リージョン側の Interface VPCE へ
+# VPC Peering と Route 53 Resolver の条件付き転送で到達する。
+#
+# **リージョン間 VPC ピアリングでは相手リージョンの SG を参照できない**
+# （公式に「別リージョンのピア VPC のセキュリティグループは参照できない。
+# 代わりにピア VPC の CIDR ブロックを使う」と明記）。そのため CIDR で書く。
+#
+# Gateway 型は同一リージョンにしかルーティングしないので、相手リージョンの
+# S3 へは Interface エンドポイント経由になる（peer_endpoints に "s3" を指定）。
+#
+# 相手側エンドポイントの SG に対する ingress（自 VPC の CIDR からの 443）は
+# 相手リージョンの state が管理する。ここでは作れない。
+
+resource "aws_security_group_rule" "egress_peer_endpoint" {
+  for_each = local.peer_endpoint_functions
+
+  type              = "egress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = aws_security_group.dr_lambda[each.key].id
+  cidr_blocks       = var.peer_endpoint_cidr_blocks
+  description       = "to peer region endpoints (${join(",", each.value.peer_endpoints)})"
 }
 
 # --- EKS クラスタへの経路 ---------------------------------------------------

@@ -16,9 +16,13 @@ variable "functions" {
                            actions            必須
                            resources          必須
                            pass_role_service  任意。iam:PassRole の渡し先を限定する
-      endpoints          この関数が到達するインターフェースエンドポイントの
+      endpoints          自リージョンのインターフェースエンドポイントの
                          サービス名。logs は全関数に自動で付くので書かない
-      gateway_endpoints  Gateway 型（s3 / dynamodb）のサービス名
+      peer_endpoints     相手リージョンのインターフェースエンドポイントの
+                         サービス名。VPC Peering 経由で到達する
+      gateway_endpoints  自リージョンの Gateway 型（s3 / dynamodb）のサービス名。
+                         Gateway 型は同一リージョンにしかルーティングしないため、
+                         相手リージョンには使えない
       eks_access         到達する EKS クラスタと付与するアクセスポリシー
                            cluster     クラスタ名
                            policy      AmazonEKSViewPolicy / AmazonEKSEditPolicy
@@ -35,6 +39,7 @@ variable "functions" {
       pass_role_service = optional(string)
     }))
     endpoints         = optional(list(string), [])
+    peer_endpoints    = optional(list(string), [])
     gateway_endpoints = optional(list(string), [])
     eks_access = optional(list(object({
       cluster    = string
@@ -95,6 +100,21 @@ variable "log_endpoint_service" {
 }
 
 # --- EKS --------------------------------------------------------------------
+
+variable "peer_endpoint_cidr_blocks" {
+  description = <<-EOT
+    相手リージョンのインターフェースエンドポイントが居るサブネットの CIDR。
+
+    **リージョン間 VPC ピアリングでは相手 SG を参照できない**（公式に
+    「別リージョンのピア VPC のセキュリティグループは参照できない。代わりに
+    ピア VPC の CIDR ブロックを使う」と明記）。そのため egress は CIDR で書く。
+
+    相手側エンドポイントの SG に対する ingress（自 VPC の CIDR からの 443）は
+    相手リージョンの state が管理する。この module では作れない。
+  EOT
+  type        = list(string)
+  default     = []
+}
 
 variable "eks_cluster_security_group_ids" {
   description = <<-EOT

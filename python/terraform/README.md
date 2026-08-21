@@ -295,16 +295,42 @@ Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たな�
 
 ### 閉塞系のクロスリージョンアクセス
 
-`apigateway-block` / `scheduler-block` / `s3-block` は相手リージョンの API を
-叩く。クロスリージョン PrivateLink は `apigateway` / `scheduler` に未対応の
-ため、**相手リージョン側の Interface VPCE へ VPC Peering と Route 53 Resolver
-の条件付き転送で到達する**（既存のクロスリージョンエンドポイントアクセス方針）。
+`apigateway-block` / `scheduler-block` / `s3-block` は**相手リージョンの API を
+叩く**ので、到達先も相手リージョンのエンドポイントになる。
+
+クロスリージョン PrivateLink は `apigateway` / `scheduler` に未対応のため、
+**相手リージョン側の Interface VPCE へ VPC Peering と Route 53 Resolver の
+条件付き転送で到達する**（既存のクロスリージョンエンドポイントアクセス方針）。
 
 boto3 は `region_name` からホスト名を組み立てるだけなので、DNS が相手側
 VPCE のプライベート IP に解決されれば**コードの変更は不要**。
 
-この場合、`interface_endpoint_security_group_ids` に渡すのは**相手リージョン側
-エンドポイントの SG** になる。
+```hcl
+"apigateway-block" = {
+  peer_endpoints = ["apigateway"]   # endpoints ではなく peer_endpoints
+}
+```
+
+**`s3-block` は Gateway 型を使えない。** Gateway 型は VPC のルートテーブルに
+紐づき、**同一リージョンにしかルーティングしない**。相手リージョンの S3 へは
+Interface エンドポイント経由になる。
+
+| 関数 | 自リージョン | 相手リージョン |
+|---|---|---|
+| `s3-block` | logs | **s3（Interface）** |
+| `s3-enable` / `s3-check` | logs ＋ s3（Gateway） | — |
+
+#### CIDR で書く理由
+
+**リージョン間 VPC ピアリングでは相手リージョンの SG を参照できない。**
+公式に「別リージョンのピア VPC のセキュリティグループは参照できない。代わりに
+ピア VPC の CIDR ブロックを使う」と明記されている。
+
+そのため `peer_endpoint_cidr_blocks`（相手側エンドポイントが居るサブネットの
+CIDR）を渡し、egress を CIDR で書く。
+
+**相手側エンドポイントの SG に対する ingress（自 VPC の CIDR からの 443）は、
+この module では作れない。** 相手リージョンの state が管理する範囲になる。
 
 ## EKS の権限
 

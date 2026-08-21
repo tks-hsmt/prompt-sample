@@ -18,9 +18,11 @@
 locals {
   functions = {
     # --- API Gateway -------------------------------------------------------
+    # 相手リージョンの API を叩くため、到達先も相手リージョンの
+    # エンドポイントになる（VPC Peering + Resolver 経由）。
     "apigateway-block" = {
-      handler = "dr_switch.apigateway.handlers.block"
-      endpoints = ["apigateway"]
+      handler        = "dr_switch.apigateway.handlers.block"
+      peer_endpoints = ["apigateway"]
       env = {
         REGION      = local.peer_region
         REST_API_ID = local.peer_rest_api_id
@@ -69,8 +71,8 @@ locals {
     # UpdateSchedule は Target.RoleArn を含む全パラメータを要求するため
     # iam:PassRole が必須。他のどの関数にも不要な権限なので見落としやすい。
     "scheduler-block" = {
-      handler = "dr_switch.scheduler.handlers.block"
-      endpoints = ["scheduler"]
+      handler        = "dr_switch.scheduler.handlers.block"
+      peer_endpoints = ["scheduler"]
       env     = { REGION = local.peer_region, SCHEDULE_GROUP = local.peer_schedule_group }
       policy = [
         {
@@ -121,9 +123,11 @@ locals {
     # --- S3 ----------------------------------------------------------------
     # 案 A（切替時にトグル）を採る場合のみ block / enable をデプロイする。
     # バケットは SSE-S3（AES256）なので KMS 関連の権限は不要。
+    # Gateway 型は同一リージョンにしかルーティングしない。相手リージョンの
+    # S3 へは Interface エンドポイント経由で到達する。
     "s3-block" = {
-      handler = "dr_switch.s3.handlers.block"
-      gateway_endpoints = ["s3"]
+      handler        = "dr_switch.s3.handlers.block"
+      peer_endpoints = ["s3"]
       env = {
         REGION              = local.peer_region
         REPLICATION_BUCKETS = jsonencode(local.peer_buckets)
