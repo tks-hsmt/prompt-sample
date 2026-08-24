@@ -112,17 +112,28 @@ locals {
       ]
     }
 
+    # 滞留の確認に CloudWatch のメトリクスを見る。待ち系のメトリクスは
+    # 宛先バケットのリージョンに発行されるため、自リージョンで完結する。
     "s3-check" = {
-      handler = "dr_switch.s3.handlers.check"
+      handler           = "dr_switch.s3.handlers.check"
+      endpoints         = ["monitoring"]
       gateway_endpoints = ["s3"]
       env = {
-        REGION              = local.self_region
-        REPLICATION_BUCKETS = jsonencode(local.self_buckets)
+        REGION               = local.self_region
+        REPLICATION_BUCKETS  = jsonencode(local.self_buckets)
+        REPLICATION_LOOKBACK = "300"
       }
-      policy = [{
-        actions   = ["s3:GetReplicationConfiguration"]
-        resources = local.self_bucket_arns
-      }]
+      policy = [
+        {
+          actions   = ["s3:GetReplicationConfiguration"]
+          resources = local.self_bucket_arns
+        },
+        {
+          # メトリクスの取得はリソースレベル権限に非対応
+          actions   = ["cloudwatch:GetMetricStatistics"]
+          resources = ["*"]
+        },
+      ]
     }
 
     # --- Lambda / DynamoDB -------------------------------------------------

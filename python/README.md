@@ -836,6 +836,44 @@ Well-Architected は「**復旧時にはコントロールプレーンではな�
 痕跡で、切替先でサービスを開始できるかとは別。切替後に CloudWatch メトリクスで
 追跡する。
 
+### S3 レプリケーションの滞留確認
+
+`OperationsPendingReplication`（CloudWatch）で、レプリケーション待ちが
+残っていないかを確認する。
+
+```
+aws cloudwatch get-metric-statistics --namespace AWS/S3
+  --metric-name OperationsPendingReplication
+  --dimensions Name=DestinationBucket,Value=<b> Name=RuleId,Value=<id>
+  --statistics Maximum --period 60 --start-time <t0> --end-time <t1>
+```
+
+**待ち系のメトリクスは宛先バケットのリージョンに発行される**（公式の表で
+`ReplicationLatency` / `BytesPendingReplication` /
+`OperationsPendingReplication` の 3 つとも確認済み）。平時は東京→大阪なので
+メトリクスは大阪にあり、**切替先が自リージョンの CloudWatch を見れば済む**。
+クロスリージョンアクセスは発生しない。
+
+`OperationsFailedReplication` だけは送信元リージョンに発行されるため、
+切替先からは見えない。確認対象にしない。
+
+ディメンションは `SourceBucket` / `DestinationBucket` / `RuleId` の 3 つ。
+`RuleId` は `get_bucket_replication` から取得する。
+
+#### 前提と注意点
+
+- **メトリクスの有効化が必要。** レプリケーションルールの
+  `Destination.Metrics.Status` を `Enabled` にする。既定では発行されない
+- **ベストエフォート配信。** 公式に「完全性と適時性は保証されない」と明記
+  されている。**データポイントが無い場合は判定しない**（`None` を返して
+  問題として扱わない）。無いことを「待ちなし」と解釈すると見逃す
+- **新規オブジェクトのみが対象。** 既存オブジェクトのバッチレプリケーションは
+  含まれない
+- **閉塞の後に確認すること。** 送信元への書き込みが続いていれば待ちは減らない
+
+`REPLICATION_LOOKBACK`（既定 300 秒）で遡る期間を指定する。メトリクスは
+分単位で発行されるため、最低でも数分は必要。
+
 ### S3 のバケット存在確認を行わない理由
 
 バケットには状態という概念が無く、時間経過で失われる性質のものでもない。

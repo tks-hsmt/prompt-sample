@@ -18,6 +18,7 @@ PutBucketReplication は宛先バケットの存在を検証する。宛先リ�
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from botocore.exceptions import ClientError
@@ -43,6 +44,17 @@ NOT_CONFIGURED = "ReplicationConfigurationNotFoundError"
 # 値は boto3-stubs の ReplicationRuleStatusType に対応（Enabled / Disabled の 2 値）。
 RULE_ENABLED: ReplicationRuleStatusType = "Enabled"
 RULE_DISABLED: ReplicationRuleStatusType = "Disabled"
+
+# レプリケーションの滞留を見るメトリクス。
+# 待ち系 3 つ（Latency / BytesPending / OperationsPending）はいずれも
+# **宛先バケットのリージョン**に発行されるため、切替先から自リージョンの
+# CloudWatch を見れば済む。クロスリージョンアクセスは発生しない。
+#
+# OperationsFailedReplication だけは送信元リージョンに発行されるため、
+# 切替先からは見えない。ここでは確認しない。
+PENDING_METRIC = "OperationsPendingReplication"
+S3_NAMESPACE = "AWS/S3"
+METRIC_PERIOD_SEC = 60
 
 
 def _set_replication(cfg: S3BaseConfig, bucket: str, *,
@@ -87,14 +99,14 @@ def _apply(cfg: S3BaseConfig, *, enabled: bool, dry_run: bool,
     )
 
 
-@lambda_handler("s3-replication-block", S3BlockConfig, best_effort=True)
+@lambda_handler("s3-block", S3BlockConfig, best_effort=True)
 def block(cfg: S3BlockConfig, event: dict, *, dry_run: bool, context) -> dict:
     """レプリケーションを停止する。"""
     _apply(cfg, enabled=False, dry_run=dry_run, best_effort=True)
     return {}
 
 
-@lambda_handler("s3-replication-enable", S3EnableConfig)
+@lambda_handler("s3-enable", S3EnableConfig)
 def enable(cfg: S3EnableConfig, event: dict, *, dry_run: bool, context) -> dict:
     """逆方向レプリケーションを開始する.
 
@@ -105,14 +117,48 @@ def enable(cfg: S3EnableConfig, event: dict, *, dry_run: bool, context) -> dict:
     return {}
 
 
+def _pending_replication(cw, bucket: str, rule_id: str,
+                         lookback: int) -> float | None:
+    """レプリケーション待ちの操作数を返す。データが無ければ None.
+
+    aws cloudwatch get-metric-statistics --namespace AWS/S3
+      --metric-name OperationsPendingReplication
+      --dimensions Name=DestinationBucket,Value=<bucket> Name=RuleId,Value=<id>
+      --statistics Maximum --period 60 --start-time <t0> --end-time <t1>
+      の Datapoints[].Maximum
+
+    メトリクスはベストエフォート配信で、公式に「完全性と適時性は保証され
+    ない」と明記されている。データが無いことを「待ちなし」と解釈すると
+    見逃すため、None を返して呼び出し側で区別する。
+    """
+    now = datetime.now(UTC)
+    points = cw.get_metric_statistics(
+        Namespace=S3_NAMESPACE,
+        MetricName=PENDING_METRIC,
+        Dimensions=[
+            {"Name": "DestinationBucket", "Value": bucket},
+            {"Name": "RuleId", "Value": rule_id},
+        ],
+        StartTime=now - timedelta(seconds=lookback),
+        EndTime=now,
+        Period=METRIC_PERIOD_SEC,
+        Statistics=["Maximum"],
+    )["Datapoints"]
+    if not points:
+        return None
+    # 最新のデータポイントを見る
+    return max(points, key=lambda p: p["Timestamp"])["Maximum"]
+
+
 @lambda_handler("s3-check", S3CheckConfig)
 def check(cfg: S3CheckConfig, event: dict, *, dry_run: bool, context) -> dict:
-    """レプリケーションルールの Status を確認する.
+    """レプリケーションルールの Status と、滞留の有無を確認する.
 
     バケットの存在確認は行わない。バケットには状態という概念が無く、
     時間経過で失われる性質のものでもないため、切替時に確認する意味がない。
     """
     s3 = client("s3", cfg.region)
+    cw = client("cloudwatch", cfg.region)
     problems: dict[str, dict] = {}
     fatal: dict[str, dict] = {}
 
@@ -133,6 +179,19 @@ def check(cfg: S3CheckConfig, event: dict, *, dry_run: bool, context) -> dict:
                     if rule["Status"] != RULE_ENABLED}
         if disabled:
             problems[bucket] = {"rules_not_enabled": disabled}
+            continue
+
+        # レプリケーション待ちが残っていないか。閉塞の後に確認すること。
+        # 送信元への書き込みが続いていれば待ちは減らない。
+        pending = {
+            rule["ID"]: value
+            for rule in rules
+            if (value := _pending_replication(
+                cw, bucket, rule["ID"], cfg.replication_lookback)) is not None
+            and value > 0
+        }
+        if pending:
+            problems[bucket] = {"operations_pending_replication": pending}
 
     if fatal:
         raise NotRecoverableError(
