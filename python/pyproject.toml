@@ -1,0 +1,17 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["dr_switch"]
+branch = true
+
+[tool.coverage.report]
+# 100% を維持する。下回ったら失敗させる。
+fail_under = 100
+show_missing = true
+exclude_lines = [
+  "pragma: no cover",
+  # 型チェック時のみ評価される import
+  "if TYPE_CHECKING:",
+]

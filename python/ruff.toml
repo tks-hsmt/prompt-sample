@@ -25,6 +25,8 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
+# テストコードは assert とダミー認証情報を使う。private への参照も許容する。
+"tests/*" = ["S101", "S105", "S106", "SLF001", "ARG001", "ARG002", "PLR2004"]
 # ハンドラのシグネチャは全ハンドラで揃える。使わない引数があっても変えない。
 "dr_switch/*/handlers.py" = ["ARG001"]
 "dr_switch/core/middleware.py" = ["ARG001"]

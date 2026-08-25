@@ -5,4 +5,11 @@
 # バージョンは boto3 と揃える。
 boto3-stubs[apigateway,cloudwatch,dynamodb,efs,elbv2,lambda,s3,scheduler]==1.43.72
 
+# AWS 公式ブログ（Unit Testing AWS Lambda with Python and Mock AWS Services）が
+# 推奨するモック。自前の Fake クラスと違い、API 呼び出しの引数が不正なら
+# moto がエラーを返すため「呼び出し方が正しいか」まで検証できる。
+moto[apigateway,awslambda,cloudwatch,dynamodb,ec2,efs,eks,elbv2,iam,s3,scheduler]==5.2.3
+
+pytest==9.1.1
+pytest-cov==7.1.0
 ruff==0.9.6

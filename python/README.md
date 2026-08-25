@@ -281,6 +281,70 @@ def check(cfg: NlbCheckConfig, event: dict, *, dry_run: bool, context) -> dict:
 `inject_lambda_context` は `lambda_handler` の**外側**に置く。内側に置くと
 シグネチャが合わず実行時に TypeError になる。
 
+## テスト
+
+```bash
+pip install -r requirements-dev.txt
+pytest              # 146 件
+pytest --cov        # カバレッジ（100% 未満なら失敗する）
+```
+
+### 方針
+
+AWS 公式ブログ
+（[Unit Testing AWS Lambda with Python and Mock AWS Services](https://aws.amazon.com/blogs/devops/unit-testing-aws-lambda-with-python-and-mock-aws-services/)）
+が推奨する **moto** を使う。
+
+自前の Fake クラスと違い、**API 呼び出しの引数が不正なら moto がエラーを
+返す**ため、「呼び出し方が正しいか」まで検証できる。たとえば
+`update_stage` の `patchOperations` は、パス指定
+（`/*/*/throttling/rateLimit`）が正しくないと反映されない。
+
+| ファイル | 件数 | 対象 |
+|---|---|---|
+| `test_core.py` | 28 | 例外分類、`run_per_item`、config、`lambda_handler` |
+| `test_apigateway.py` | 15 | block / enable / check |
+| `test_scheduler.py` | 14 | block / enable / check |
+| `test_s3.py` | 14 | block / enable / check（滞留の検知を含む） |
+| `test_observability.py` | 25 | lambda / dynamodb / nlb / cloudwatch / efs |
+| `test_eks.py` | 20 | check / rollout_restart / restart_pods |
+
+### moto が再現しない箇所
+
+**カスタマイズして通す。** 実測で確認した差分は次の通り（moto 5.2.3）。
+
+| 箇所 | 対応 |
+|---|---|
+| `get_rest_api` が `apiStatus` を返さない | `RestAPI.to_dict` に注入 |
+| `describe_alarms` が `AlarmNamePrefix` 併用時に `StateValue` を無視 | クライアントのメソッドを補正 |
+| Lambda の `State` が常に Active 相当 | `get_function_configuration` の応答を差し替え |
+| DynamoDB の `TableStatus` / EFS の `LifeCycleState` | 同上 |
+| ELB のターゲット状態 | 同上 |
+
+`apiStatus` のテストが通ること自体が、**boto3 のモデルに `apiStatus` が
+存在すること**（botocore 1.41.0 以上）の確認にもなる。モデルに無ければ
+パース時に捨てられ、`PENDING` / `FAILED` のテストが落ちる。
+
+### Kubernetes API
+
+**moto の対象外。** Python の kubernetes クライアントには、Go の client-go に
+ある fake クライアント相当が存在しない（要望の Issue は 2018 年から未実装）。
+`AppsV1Api` / `CoreV1Api` を差し替える。
+
+素の dict ではなく **`kubernetes.client.models` の本物のモデル**
+（`V1Deployment` など）で応答を組み立てるため、属性名の誤りや存在しない
+フィールドは検出できる。
+
+### moto でも検出できないもの
+
+- **boto3 のバージョン依存**。カスタマイズした moto が `apiStatus` を返しても、
+  boto3 のモデルに無ければパース時に捨てられる
+- **CloudWatch メトリクスの実際の発行**（`AWS/S3` 名前空間へは実環境では
+  `PutMetricData` できない。moto 内でのみ書ける）
+- **IAM 権限、VPC エンドポイントの到達性、タイムアウトの妥当性**
+
+これらは実機での手動試験で確認する。
+
 ## デプロイ（コンテナイメージ）
 
 既存の Lambda に合わせてコンテナイメージでデプロイする。Layer は使わない。
