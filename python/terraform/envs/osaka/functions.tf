@@ -136,6 +136,29 @@ locals {
       ]
     }
 
+    # --- Route 53 ----------------------------------------------------------
+    # カスタムドメイン方式のため、切替は Alias レコードの向き先を変える操作。
+    # レコードは 1 つで、AliasTarget.DNSName を切替先リージョンの
+    # VPC エンドポイントへ向ける。
+    #
+    # Route 53 はグローバルサービスで、東京・大阪どちらから呼んでも
+    # 同じホストゾーンを操作できる。
+    "route53-check" = {
+      handler   = "dr_switch.route53.handlers.check"
+      endpoints = ["route53"]
+      env = {
+        REGION               = local.self_region
+        HOSTED_ZONE_ID       = local.hosted_zone_id
+        RECORD_NAME          = local.record_name
+        ALIAS_DNS_NAME       = local.self_vpce_dns_name
+        ALIAS_HOSTED_ZONE_ID = local.self_vpce_hosted_zone_id
+      }
+      policy = [{
+        actions   = ["route53:ListResourceRecordSets"]
+        resources = [local.hosted_zone_arn]
+      }]
+    }
+
     # --- Lambda / DynamoDB -------------------------------------------------
     # GetFunction ではなく GetFunctionConfiguration。応答が軽く権限も狭い
     "lambda-check" = {
@@ -247,9 +270,37 @@ locals {
     }
   }
 
-  # 相手リージョンに依存する関数（閉塞系）。
+  # 相手リージョンに依存する関数（閉塞系・DNS 切替）。
   # peer_ready = false のときは作らない。相手の ID / ARN が取れないため。
   block_functions = {
+    # DNS 切替。**これは閉塞ではない。** キャッシュを持つリゾルバは
+    # しばらく旧リージョンへ送り続けるため、旧リージョンを止めるのは
+    # apigateway-block（スロットリング 0）が担当する。
+    #
+    # 相手リージョンの VPCE 情報が要るので peer_ready が前提。
+    "route53-switch" = {
+      handler   = "dr_switch.route53.handlers.switch"
+      endpoints = ["route53"]
+      env = {
+        REGION               = local.self_region
+        HOSTED_ZONE_ID       = local.hosted_zone_id
+        RECORD_NAME          = local.record_name
+        ALIAS_DNS_NAME       = local.self_vpce_dns_name
+        ALIAS_HOSTED_ZONE_ID = local.self_vpce_hosted_zone_id
+      }
+      policy = [
+        {
+          actions   = ["route53:ChangeResourceRecordSets"]
+          resources = [local.hosted_zone_arn]
+        },
+        {
+          # GetChange はリソースレベル権限に非対応
+          actions   = ["route53:GetChange"]
+          resources = ["*"]
+        },
+      ]
+    }
+
 
     # エンドポイントになる（VPC Peering + Resolver 経由）。
     "apigateway-block" = {

@@ -57,6 +57,25 @@ locals {
 
   alarm_prefix = "gems-ip-"
 
+  # --- Route 53（カスタムドメインの切替） -----------------------------------
+  # 切替は Alias レコードの向き先を変える操作。レコードは 1 つで、
+  # AliasTarget.DNSName を切替先リージョンの VPC エンドポイントへ向ける。
+  #
+  # 切替先は「自リージョンの VPC エンドポイント」。東京の switch は東京へ、
+  # 大阪の switch は大阪へ向けるので、どちらを実行するかで方向が決まる。
+  #
+  # プライベートホストゾーンは VPC に関連付ける。両リージョンの VPC に
+  # 関連付いた 1 つのゾーンを共有する前提。別 state なら
+  # terraform_remote_state から取ること。
+
+  hosted_zone_id  = aws_route53_zone.private.zone_id
+  hosted_zone_arn = "arn:aws:route53:::hostedzone/${aws_route53_zone.private.zone_id}"
+  record_name     = "gems-ip.${aws_route53_zone.private.name}"
+
+  # API Gateway の VPC エンドポイント。Alias のターゲットになる。
+  self_vpce_dns_name       = tolist(aws_vpc_endpoint.execute_api.dns_entry)[0].dns_name
+  self_vpce_hosted_zone_id = tolist(aws_vpc_endpoint.execute_api.dns_entry)[0].hosted_zone_id
+
   # --- VPC エンドポイント（別 state / output 無し） --------------------------
 
   interface_endpoint_security_group_ids = {

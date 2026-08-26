@@ -1,70 +1,51 @@
 {
-  "Comment": "DR 切替ワークフロー。実行するのは常に「これから ACTIVE になる側」のリージョン。切替方向は、どのリージョンのステートマシンを起動したかで決まる（入力に direction を持たない）。",
+  "Comment": "DR 切替。閉塞 -> DNS 切替 -> 開放 -> 確認の順で進める。\n閉塞は best_effort（旧リージョンが落ちていれば失敗しうる）なので ContinuableError を Catch して先へ進む。開放と確認は失敗したら止める。\nDNS 切替を閉塞の後・開放の前に置くのは、先に切り替えるとまだ開放して いない切替先へトラフィックが向くため。\n\nPod 再起動は 2 方式ある。ここでは Kubernetes API を直接叩く rollout_restart を使う。既存 Lambda を呼ぶ restart_pods を使う場合は FunctionName を dr_eks_restart_pods_function_arn に差し替える。呼ばれる側が完了を待つため、その分 RTO が伸びる。",
   "QueryLanguage": "JSONata",
-  "StartAt": "FenceApiGw",
-  "TimeoutSeconds": 1800,
+  "StartAt": "FenceApiGateway",
   "States": {
-    "FenceApiGw": {
-      "Comment": "旧 ACTIVE（PEER）のスロットリングを 0 にして閉塞する。リージョン障害中は失敗しうるためベストエフォート。",
+    "FenceApiGateway": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "${dr_apigateway_block_function_arn}",
-        "Payload": {
-          "dry_run": "{% $states.context.Execution.Input.dry_run %}"
-        }
+        "Payload": "{% $states.input %}"
       },
       "Retry": [
         {
           "ErrorEquals": [
             "RetryableError"
           ],
-          "IntervalSeconds": 5,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
-        },
-        {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.TooManyRequestsException"
-          ],
-          "IntervalSeconds": 5,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
         }
       ],
       "Catch": [
         {
-          "Comment": "閉塞失敗は握りつぶさず記録して続行する。PEER が落ちていれば当然失敗するため。",
           "ErrorEquals": [
             "ContinuableError"
           ],
           "Next": "FenceScheduler",
-          "Output": {
-            "fenceApiGwError": "{% $states.errorOutput %}"
-          }
+          "Output": "{% $states.input %}"
         }
       ],
       "Next": "FenceScheduler"
     },
     "FenceScheduler": {
-      "Comment": "旧 ACTIVE（PEER）の EventBridge Scheduler を停止する。",
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Arguments": {
         "FunctionName": "${dr_scheduler_block_function_arn}",
-        "Payload": {
-          "dry_run": "{% $states.context.Execution.Input.dry_run %}"
-        }
+        "Payload": "{% $states.input %}"
       },
       "Retry": [
         {
           "ErrorEquals": [
             "RetryableError"
           ],
-          "IntervalSeconds": 5,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
         }
       ],
       "Catch": [
@@ -72,23 +53,142 @@
           "ErrorEquals": [
             "ContinuableError"
           ],
-          "Next": "CheckAll",
-          "Output": {
-            "fenceSchedulerError": "{% $states.errorOutput %}"
-          }
+          "Next": "FenceS3",
+          "Output": "{% $states.input %}"
+        }
+      ],
+      "Next": "FenceS3"
+    },
+    "FenceS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_s3_block_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "ContinuableError"
+          ],
+          "Next": "SwitchDns",
+          "Output": "{% $states.input %}"
+        }
+      ],
+      "Next": "SwitchDns"
+    },
+    "SwitchDns": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_route53_switch_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
+        }
+      ],
+      "Next": "RestartWorkloads"
+    },
+    "RestartWorkloads": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_eks_rollout_restart_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
+        }
+      ],
+      "Next": "ActivateS3"
+    },
+    "ActivateS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_s3_enable_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
+        }
+      ],
+      "Next": "ActivateScheduler"
+    },
+    "ActivateScheduler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_scheduler_enable_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
+        }
+      ],
+      "Next": "ActivateApiGateway"
+    },
+    "ActivateApiGateway": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Arguments": {
+        "FunctionName": "${dr_apigateway_enable_function_arn}",
+        "Payload": "{% $states.input %}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "RetryableError"
+          ],
+          "IntervalSeconds": 30,
+          "BackoffRate": 1.0,
+          "MaxAttempts": 10
         }
       ],
       "Next": "CheckAll"
     },
     "CheckAll": {
-      "Comment": "観測系 7 本を並列実行する。各分岐で Catch して Pass に落とすことで、1 本が失敗しても他の分岐が最後まで走り、7 件すべての結果が揃う。Catch を付けないと最初に失敗した分岐で他が停止し、何がダメだったのか一度に把握できない。",
       "Type": "Parallel",
-      "Next": "AllReady?",
       "Branches": [
         {
-          "StartAt": "CheckApiGw",
+          "StartAt": "CheckApiGateway",
           "States": {
-            "CheckApiGw": {
+            "CheckApiGateway": {
               "Type": "Task",
               "Resource": "arn:aws:states:::lambda:invoke",
               "Arguments": {
@@ -110,24 +210,174 @@
                   "ErrorEquals": [
                     "States.ALL"
                   ],
-                  "Next": "ApiGwNg",
+                  "Next": "ApiGatewayNg",
                   "Output": "{% $states.errorOutput %}"
                 }
               ],
-              "Next": "ApiGwOk"
+              "Next": "ApiGatewayOk"
             },
-            "ApiGwOk": {
+            "ApiGatewayOk": {
               "Type": "Pass",
               "Output": {
-                "check": "apigw",
+                "check": "apigateway",
                 "ready": true
               },
               "End": true
             },
-            "ApiGwNg": {
+            "ApiGatewayNg": {
               "Type": "Pass",
               "Output": {
-                "check": "apigw",
+                "check": "apigateway",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckScheduler",
+          "States": {
+            "CheckScheduler": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_scheduler_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "SchedulerNg",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "SchedulerOk"
+            },
+            "SchedulerOk": {
+              "Type": "Pass",
+              "Output": {
+                "check": "scheduler",
+                "ready": true
+              },
+              "End": true
+            },
+            "SchedulerNg": {
+              "Type": "Pass",
+              "Output": {
+                "check": "scheduler",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckS3",
+          "States": {
+            "CheckS3": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_s3_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "S3Ng",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "S3Ok"
+            },
+            "S3Ok": {
+              "Type": "Pass",
+              "Output": {
+                "check": "s3",
+                "ready": true
+              },
+              "End": true
+            },
+            "S3Ng": {
+              "Type": "Pass",
+              "Output": {
+                "check": "s3",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "CheckRoute53",
+          "States": {
+            "CheckRoute53": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_route53_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "Route53Ng",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "Route53Ok"
+            },
+            "Route53Ok": {
+              "Type": "Pass",
+              "Output": {
+                "check": "route53",
+                "ready": true
+              },
+              "End": true
+            },
+            "Route53Ng": {
+              "Type": "Pass",
+              "Output": {
+                "check": "route53",
                 "ready": false,
                 "cause": "{% $states.input.Cause %}"
               },
@@ -142,7 +392,7 @@
               "Type": "Task",
               "Resource": "arn:aws:states:::lambda:invoke",
               "Arguments": {
-                "FunctionName": "${dr_lambda_function_check_function_arn}",
+                "FunctionName": "${dr_lambda_check_function_arn}",
                 "Payload": {}
               },
               "Retry": [
@@ -286,59 +536,9 @@
           }
         },
         {
-          "StartAt": "CheckS3",
+          "StartAt": "CheckCloudwatch",
           "States": {
-            "CheckS3": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
-              "Arguments": {
-                "FunctionName": "${dr_s3_check_function_arn}",
-                "Payload": {}
-              },
-              "Retry": [
-                {
-                  "ErrorEquals": [
-                    "RetryableError"
-                  ],
-                  "IntervalSeconds": 30,
-                  "BackoffRate": 1.0,
-                  "MaxAttempts": 10
-                }
-              ],
-              "Catch": [
-                {
-                  "ErrorEquals": [
-                    "States.ALL"
-                  ],
-                  "Next": "S3Ng",
-                  "Output": "{% $states.errorOutput %}"
-                }
-              ],
-              "Next": "S3Ok"
-            },
-            "S3Ok": {
-              "Type": "Pass",
-              "Output": {
-                "check": "s3",
-                "ready": true
-              },
-              "End": true
-            },
-            "S3Ng": {
-              "Type": "Pass",
-              "Output": {
-                "check": "s3",
-                "ready": false,
-                "cause": "{% $states.input.Cause %}"
-              },
-              "End": true
-            }
-          }
-        },
-        {
-          "StartAt": "CheckAlarms",
-          "States": {
-            "CheckAlarms": {
+            "CheckCloudwatch": {
               "Type": "Task",
               "Resource": "arn:aws:states:::lambda:invoke",
               "Arguments": {
@@ -360,125 +560,24 @@
                   "ErrorEquals": [
                     "States.ALL"
                   ],
-                  "Next": "AlarmsNg",
+                  "Next": "CloudwatchNg",
                   "Output": "{% $states.errorOutput %}"
                 }
               ],
-              "Next": "AlarmsOk"
+              "Next": "CloudwatchOk"
             },
-            "AlarmsOk": {
+            "CloudwatchOk": {
               "Type": "Pass",
               "Output": {
-                "check": "alarms",
+                "check": "cloudwatch",
                 "ready": true
               },
               "End": true
             },
-            "AlarmsNg": {
+            "CloudwatchNg": {
               "Type": "Pass",
               "Output": {
-                "check": "alarms",
-                "ready": false,
-                "cause": "{% $states.input.Cause %}"
-              },
-              "End": true
-            }
-          }
-        },
-        {
-          "StartAt": "CheckWorkload",
-          "States": {
-            "CheckWorkload": {
-              "Comment": "NLB のヘルスチェックは TCP のため、Pod の Ready 判定はこちらが担う。NLB と両方 ready であることを条件にする。",
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
-              "Arguments": {
-                "FunctionName": "${dr_eks_check_function_arn}",
-                "Payload": {}
-              },
-              "Retry": [
-                {
-                  "ErrorEquals": [
-                    "RetryableError"
-                  ],
-                  "IntervalSeconds": 30,
-                  "BackoffRate": 1.0,
-                  "MaxAttempts": 10
-                }
-              ],
-              "Catch": [
-                {
-                  "ErrorEquals": [
-                    "States.ALL"
-                  ],
-                  "Next": "WorkloadNg",
-                  "Output": "{% $states.errorOutput %}"
-                }
-              ],
-              "Next": "WorkloadOk"
-            },
-            "WorkloadOk": {
-              "Type": "Pass",
-              "Output": {
-                "check": "workload",
-                "ready": true
-              },
-              "End": true
-            },
-            "WorkloadNg": {
-              "Type": "Pass",
-              "Output": {
-                "check": "workload",
-                "ready": false,
-                "cause": "{% $states.input.Cause %}"
-              },
-              "End": true
-            }
-          }
-        },
-        {
-          "StartAt": "CheckScheduler",
-          "States": {
-            "CheckScheduler": {
-              "Type": "Task",
-              "Resource": "arn:aws:states:::lambda:invoke",
-              "Arguments": {
-                "FunctionName": "${dr_scheduler_check_function_arn}",
-                "Payload": {}
-              },
-              "Retry": [
-                {
-                  "ErrorEquals": [
-                    "RetryableError"
-                  ],
-                  "IntervalSeconds": 30,
-                  "BackoffRate": 1.0,
-                  "MaxAttempts": 10
-                }
-              ],
-              "Catch": [
-                {
-                  "ErrorEquals": [
-                    "States.ALL"
-                  ],
-                  "Next": "SchedulerNg",
-                  "Output": "{% $states.errorOutput %}"
-                }
-              ],
-              "Next": "SchedulerOk"
-            },
-            "SchedulerOk": {
-              "Type": "Pass",
-              "Output": {
-                "check": "scheduler",
-                "ready": true
-              },
-              "End": true
-            },
-            "SchedulerNg": {
-              "Type": "Pass",
-              "Output": {
-                "check": "scheduler",
+                "check": "cloudwatch",
                 "ready": false,
                 "cause": "{% $states.input.Cause %}"
               },
@@ -535,89 +634,77 @@
               "End": true
             }
           }
+        },
+        {
+          "StartAt": "CheckEks",
+          "States": {
+            "CheckEks": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Arguments": {
+                "FunctionName": "${dr_eks_check_function_arn}",
+                "Payload": {}
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "RetryableError"
+                  ],
+                  "IntervalSeconds": 30,
+                  "BackoffRate": 1.0,
+                  "MaxAttempts": 10
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "EksNg",
+                  "Output": "{% $states.errorOutput %}"
+                }
+              ],
+              "Next": "EksOk"
+            },
+            "EksOk": {
+              "Type": "Pass",
+              "Output": {
+                "check": "eks",
+                "ready": true
+              },
+              "End": true
+            },
+            "EksNg": {
+              "Type": "Pass",
+              "Output": {
+                "check": "eks",
+                "ready": false,
+                "cause": "{% $states.input.Cause %}"
+              },
+              "End": true
+            }
+          }
         }
-      ]
+      ],
+      "Next": "AllReady?"
     },
     "AllReady?": {
-      "Comment": "Parallel の出力は分岐ごとの結果を順に並べた配列。JSONata なら配列の全要素判定が 1 行で書ける。",
       "Type": "Choice",
       "Choices": [
         {
           "Condition": "{% $not(false in $states.input.ready) %}",
-          "Next": "ActivateScheduler"
+          "Next": "Succeeded"
         }
       ],
       "Default": "NotReady"
     },
+    "Succeeded": {
+      "Type": "Succeed"
+    },
     "NotReady": {
-      "Comment": "どの確認が NG だったかは Parallel の出力配列にすべて残っている。開放していないので旧 ACTIVE 側は閉塞されたままである点に注意。",
       "Type": "Fail",
       "Error": "NotReady",
-      "Cause": "One or more readiness checks did not pass. See the Parallel state output for details."
-    },
-    "ActivateScheduler": {
-      "Comment": "新 ACTIVE（SELF）を開放する。ここからの失敗は Catch しない（切替不成立のため停止させる）。",
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Arguments": {
-        "FunctionName": "${dr_scheduler_enable_function_arn}",
-        "Payload": {
-          "dry_run": "{% $states.context.Execution.Input.dry_run %}"
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "RetryableError"
-          ],
-          "IntervalSeconds": 5,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
-        }
-      ],
-      "Next": "ActivateApiGw"
-    },
-    "ActivateApiGw": {
-      "Comment": "スロットリングを通常値へ戻す。throttle を Payload に指定しなければ Lambda の環境変数の値が使われる。",
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Arguments": {
-        "FunctionName": "${dr_apigateway_enable_function_arn}",
-        "Payload": {
-          "dry_run": "{% $states.context.Execution.Input.dry_run %}"
-        }
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "RetryableError"
-          ],
-          "IntervalSeconds": 5,
-          "BackoffRate": 2,
-          "MaxAttempts": 3
-        }
-      ],
-      "Next": "VerifyAfterActivate"
-    },
-    "VerifyAfterActivate": {
-      "Comment": "開放が効いたことを実リクエストで確認する。スロットリングが 0 のままなら 429 が返るため RetryableError になり、ここで再試行される。",
-      "Type": "Task",
-      "Resource": "arn:aws:states:::lambda:invoke",
-      "Arguments": {
-        "FunctionName": "${dr_apigateway_check_function_arn}",
-        "Payload": {}
-      },
-      "Retry": [
-        {
-          "ErrorEquals": [
-            "RetryableError"
-          ],
-          "IntervalSeconds": 15,
-          "BackoffRate": 1.0,
-          "MaxAttempts": 8
-        }
-      ],
-      "End": true
+      "Cause": "1 つ以上の確認が通らなかった。実行履歴の CheckAll を参照"
     }
   }
 }

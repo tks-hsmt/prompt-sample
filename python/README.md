@@ -517,18 +517,73 @@ Step Functions の Map で 1 バケット / 1 スケジュールずつ呼び分�
 ## フェーズ順序
 
 ```
-Fence(peer): apigw -> scheduler          # ContinuableError を Catch して続行
-  [案 A のみ] s3-replication(self, enabled=true)
-  [案 A のみ] s3-replication(peer,  enabled=false)   # 失敗許容
-Check(self): apigw / lambda / dynamodb / nlb / s3 / alarms / workload  # 並列
-Activate(self): scheduler -> apigw       # 失敗は未捕捉 = 停止
+1. 閉塞      apigateway-block -> scheduler-block -> s3-block
+2. DNS 切替  route53-switch
+3. Pod 再起動 eks-rollout-restart
+4. 開放      s3-enable -> scheduler-enable -> apigateway-enable
+5. 確認      10 リソースを Parallel で並列に確認
 ```
 
-案 A の `role=self` 有効化は **必ず Activate より前**。ライブレプリケーション
-の対象は「ルールが Enabled になった後に書かれたオブジェクト」だけなので、
-開放が先だと取りこぼしが発生し、Batch Replication での追い付きが必要になる。
+**閉塞は best_effort。** 旧リージョンが落ちていれば失敗しうるので、
+`ContinuableError` を Catch して先へ進む。開放と確認は失敗したら止める。
 
-## API Gateway の閉塞方式
+**DNS 切替を閉塞の後・開放の前に置く。** 先に切り替えると、まだ開放して
+いない切替先へトラフィックが向く。
+
+**S3 は開放を先に行う。** ライブレプリケーションの対象は `Enabled` 後に
+書かれたオブジェクトだけのため。
+
+**Pod 再起動の収束は待たない。** `eks` の check（`readyReplicas >=
+spec.replicas`）が確認する。
+
+## カスタムドメインと DNS 切替
+
+API Gateway をカスタムドメイン方式にしたため、切替は **Route 53 の Alias
+レコードの向き先を変える操作**になる。
+
+```json
+{
+  "Name": "gems-ip.<zone>.",
+  "Type": "A",
+  "AliasTarget": {
+    "HostedZoneId": "<VPCE のゾーン ID>",
+    "DNSName": "vpce-xxxxx.execute-api.<region>.vpce.amazonaws.com",
+    "EvaluateTargetHealth": true
+  }
+}
+```
+
+レコードは 1 つで、`AliasTarget.DNSName` を**切替先リージョンの VPC
+エンドポイント**へ向ける。`HostedZoneId` もリージョン固有なので一緒に変える。
+
+Alias レコードは**自分で TTL を持たず**、ターゲット側の値を使う。
+
+### これは閉塞ではない
+
+**DNS を切り替えても旧リージョンは止まらない。** キャッシュを持つリゾルバは
+しばらく旧リージョンへ送り続ける。旧リージョンを止めるのは
+`apigateway-block`（スロットリング 0）が担当し、**両方を実行する**。
+
+| | 役割 |
+|---|---|
+| `apigateway-block` | 旧リージョンが受け付けなくなる（閉塞） |
+| `route53-switch` | 新しい問い合わせが新リージョンを向く（切替） |
+
+### 伝播は switch で待たない
+
+`change_resource_record_sets` は非同期で、`get_change` が `PENDING` /
+`INSYNC` を返す。**待つと Lambda のタイムアウトに縛られる**ので、`switch` は
+変更を投げるだけにして、`route53-check` がレコードの現在値を確認する。
+
+Route 53 のレコードは変更直後から `list_resource_record_sets` に反映される。
+
+### Route 53 はグローバルサービス
+
+エンドポイントは 1 つしかなく、東京・大阪どちらから呼んでも同じホストゾーンを
+操作できる。クライアント生成時のリージョン指定（`us-east-1`）は認証に使われる
+だけ。
+
+## API Gateway の閉塞方式## API Gateway の閉塞方式
 
 **ステージのスロットリングを 0 にする方式**を採る。
 
