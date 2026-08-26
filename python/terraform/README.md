@@ -329,6 +329,35 @@ Gateway 型（`s3` / `dynamodb`）はセキュリティグループを持たな�
 アウトバウンドを許可する。プレフィックスリストは AWS が管理していて常に
 存在するため `data` で引いてよい。
 
+### Route 53 はサービス名にリージョンが入らない
+
+**Route 53 の API エンドポイントは us-east-1 の 1 つだけ**（公式に「北京・
+寧夏以外のリージョンでは us-east-1 を指定する」と明記）。他リージョンからは
+**クロスリージョン Interface VPC エンドポイント**で接続する。
+
+そのため VPC エンドポイントのサービス名が
+**`com.amazonaws.route53`**（リージョンを含まない）になる。
+
+`locals.tf` の `global_endpoint_services` にサービス名を列挙して、名前の
+組み立てを分ける。
+
+```hcl
+global_endpoint_services = ["route53"]
+
+endpoint_service_names = {
+  for svc in local.endpoint_services :
+  svc => (contains(local.global_endpoint_services, svc)
+    ? "com.amazonaws.${svc}"
+    : "com.amazonaws.${local.self_region}.${svc}")
+}
+```
+
+`functions.tf` 側は `endpoints = ["route53"]` のままでよい。DNS 名の組み立て
+規則は関数定義の関心事ではない。
+
+なお **Route 53 の PrivateLink 対応は 2025 年 11 月に提供開始**された比較的
+新しい機能。
+
 ### 閉塞系のクロスリージョンアクセス
 
 `apigateway-block` / `scheduler-block` / `s3-block` は**相手リージョンの API を

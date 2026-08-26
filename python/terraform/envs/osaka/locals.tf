@@ -163,6 +163,22 @@ locals {
     ["logs"],
     flatten([for f in local.functions : f.endpoints]),
   ))
+
+  # サービス名の例外。既定は com.amazonaws.<リージョン>.<サービス> だが、
+  # グローバルサービスはリージョンを含まない。
+  #
+  # Route 53 の API エンドポイントは us-east-1 の 1 つだけで
+  #（公式に「北京・寧夏以外のリージョンでは us-east-1 を指定する」と明記）、
+  # 他リージョンからはクロスリージョン Interface VPC エンドポイントで接続する。
+  # そのためサービス名にリージョンが入らない。
+  global_endpoint_services = ["route53"]
+
+  endpoint_service_names = {
+    for svc in local.endpoint_services :
+    svc => (contains(local.global_endpoint_services, svc)
+      ? "com.amazonaws.${svc}"
+    : "com.amazonaws.${local.self_region}.${svc}")
+  }
 }
 
 data "aws_caller_identity" "current" {}
@@ -172,9 +188,9 @@ data "aws_caller_identity" "current" {}
 # 環境チームが先に作るため、常に存在する前提でよい。
 
 data "aws_vpc_endpoint" "interface" {
-  for_each     = toset(local.endpoint_services)
+  for_each     = local.endpoint_service_names
   vpc_id       = aws_vpc.this.id
-  service_name = "com.amazonaws.${local.self_region}.${each.key}"
+  service_name = each.value
 }
 
 # 別 state の EKS クラスタ。count = 0 なら state を読みに行かない。
