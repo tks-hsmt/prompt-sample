@@ -288,17 +288,15 @@ locals {
         ALIAS_DNS_NAME       = local.self_vpce_dns_name
         ALIAS_HOSTED_ZONE_ID = local.self_vpce_hosted_zone_id
       }
-      policy = [
-        {
-          actions   = ["route53:ChangeResourceRecordSets"]
-          resources = [local.hosted_zone_arn]
-        },
-        {
-          # GetChange はリソースレベル権限に非対応
-          actions   = ["route53:GetChange"]
-          resources = ["*"]
-        },
-      ]
+      # 向き先だけを差し替えるため、現在のレコードを読んでから UPSERT する。
+      # GetChange は使わない（伝播の確認は route53-check が担当）。
+      policy = [{
+        actions = [
+          "route53:ListResourceRecordSets",
+          "route53:ChangeResourceRecordSets",
+        ]
+        resources = [local.hosted_zone_arn]
+      }]
     }
 
 

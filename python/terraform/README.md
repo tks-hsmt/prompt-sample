@@ -30,9 +30,9 @@ terraform/
 
 | 段階 | フラグ | 作られるもの |
 |---|---|---|
-| **1** | すべて `false` | Lambda 14 本・ロール・SG・エンドポイント向けルール |
+| **1** | すべて `false` | Lambda 15 本・ロール・SG・エンドポイント向けルール |
 | **2** | `external_eks_ready = true` | ＋別 state の EKS クラスタも確認・再起動の対象に |
-| **3** | `peer_ready = true` | ＋閉塞系 3 本と相手リージョン向け egress |
+| **3** | `peer_ready = true` | ＋閉塞系 3 本と DNS 切替、相手リージョン向け egress |
 
 **VPC エンドポイントは環境チームが先に作るため、常に存在する前提**でよい。
 フラグを設けず `data` で引く。サービス名のキーが渡されていなければ設定漏れ
@@ -48,7 +48,8 @@ terraform/
 | `apigateway-enable` / `check`、`scheduler-enable` / `check`、`s3-enable` / `check` | 1 |
 | `lambda-check`、`dynamodb-check`、`nlb-check`、`cloudwatch-check`、`efs-check` | 1 |
 | `eks-check`、`eks-rollout-restart`、`eks-restart-pods` | 1 |
-| **`apigateway-block`、`scheduler-block`、`s3-block`** | **3** |
+| `route53-check` | 1 |
+| **`apigateway-block`、`scheduler-block`、`s3-block`、`route53-switch`** | **3** |
 
 ### 未構築時の module の挙動
 
@@ -209,6 +210,8 @@ SG は複数付いていてもよい。module 側で (関数, エンドポイン
 | eks-check | `eks:DescribeCluster` `sts:GetCallerIdentity` | SELF クラスタ／`*` |
 | eks-rollout-restart | 同上（＋ Kubernetes RBAC の `patch`） | 同上 |
 | eks-restart-pods | `lambda:InvokeFunction` | 再起動関数 |
+| route53-switch | `route53:ListResourceRecordSets` `ChangeResourceRecordSets` | 対象ホストゾーン |
+| route53-check | `route53:ListResourceRecordSets` | 対象ホストゾーン |
 
 全関数に `AWSLambdaBasicExecutionRole`（CloudWatch Logs）と、VPC 配置のため
 `AWSLambdaVPCAccessExecutionRole`（ENI の作成・削除）を付与する。
@@ -297,6 +300,7 @@ VPC エンドポイント経由で到達する。
 | efs-check | logs, elasticfilesystem | | |
 | eks-check / rollout-restart | logs, eks, eks-auth, sts | | 2 クラスタ |
 | eks-restart-pods | logs, lambda | | |
+| route53-switch / check | logs, **route53**（グローバル） | | |
 
 SG 17 個、ルール 80 本（egress 38 + ingress 38 + Gateway egress 4）。
 

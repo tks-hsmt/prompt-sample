@@ -105,8 +105,12 @@ def test_switch_dry_run_does_not_change(route53):
     assert _alias(client, zone_id) == TOKYO_VPCE
 
 
-def test_switch_creates_record_when_absent(route53, env):
-    """UPSERT なのでレコードが無ければ作られる."""
+def test_switch_stops_when_record_absent(route53):
+    """UPSERT は作成もできるが、レコードが無い状態は設定漏れなので弾く.
+
+    check が「レコードが無ければ NotRecoverableError」と判定するのに、
+    switch が勝手に作り直すと、検出したい異常を隠すことになる。
+    """
     zone_id, client = route53
     client.change_resource_record_sets(
         HostedZoneId=zone_id,
@@ -117,8 +121,37 @@ def test_switch_creates_record_when_absent(route53, env):
                 "AliasTarget": {"HostedZoneId": TOKYO_ZONE_ID,
                                 "DNSName": TOKYO_VPCE,
                                 "EvaluateTargetHealth": True}}}]})
+    with pytest.raises(NotRecoverableError) as excinfo:
+        r53h.switch({}, Context())
+    detail = json.loads(str(excinfo.value))["route53"]
+    assert "does not exist" in detail[f"{RECORD}."]["reason"]
+    assert _alias(client, zone_id) is None
+
+
+def test_switch_preserves_other_fields(route53):
+    """向き先だけを変える。EvaluateTargetHealth などは読み取ったまま渡す.
+
+    UPSERT はレコードセット全体を置き換えるため、こちらで組み立て直すと
+    他の設定を意図せず上書きしてしまう。
+    """
+    zone_id, client = route53
+    # 現在の設定を false にしておく
+    client.change_resource_record_sets(
+        HostedZoneId=zone_id,
+        ChangeBatch={"Changes": [{
+            "Action": "UPSERT",
+            "ResourceRecordSet": {
+                "Name": f"{RECORD}.", "Type": "A",
+                "AliasTarget": {"HostedZoneId": TOKYO_ZONE_ID,
+                                "DNSName": TOKYO_VPCE,
+                                "EvaluateTargetHealth": False}}}]})
     r53h.switch({}, Context())
-    assert _alias(client, zone_id) == OSAKA_VPCE
+    for record in client.list_resource_record_sets(
+            HostedZoneId=zone_id)["ResourceRecordSets"]:
+        if record["Name"] == f"{RECORD}." and record["Type"] == "A":
+            assert record["AliasTarget"]["DNSName"] == OSAKA_VPCE
+            # 定数 True で上書きせず、元の false を維持する
+            assert record["AliasTarget"]["EvaluateTargetHealth"] is False
 
 
 def test_switch_sets_target_hosted_zone_id(route53):

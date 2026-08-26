@@ -569,6 +569,24 @@ Alias レコードは**自分で TTL を持たず**、ターゲット側の値�
 | `apigateway-block` | 旧リージョンが受け付けなくなる（閉塞） |
 | `route53-switch` | 新しい問い合わせが新リージョンを向く（切替） |
 
+### 向き先だけを差し替える
+
+**読み取ったレコードセットをそのまま使い、`AliasTarget` の `DNSName` と
+`HostedZoneId` だけを差し替える。**
+
+`ChangeAction` は `CREATE` / `DELETE` / `UPSERT` の 3 つだけで、既存レコードの
+値を変える手段は **UPSERT のみ**（API モデルで確認済み）。そして UPSERT は
+**レコードセット全体を置き換える**ため、こちらで組み立て直すと
+`EvaluateTargetHealth` やルーティングポリシー（`Weight` / `Failover` /
+`HealthCheckId` など）を意図せず上書きしてしまう。
+
+`scheduler` の `UpdateSchedule` で「get → 差し替え → update」としているのと
+同じ理由。
+
+**レコードが無い場合は止める。** UPSERT は作成もできてしまうが、レコードが
+無い状態は設定漏れで待っても現れない。`check` が `NotRecoverableError` と
+判定するのに `switch` が勝手に作り直すと、検出したい異常を隠すことになる。
+
 ### 伝播は switch で待たない
 
 `change_resource_record_sets` は非同期で、`get_change` が `PENDING` /

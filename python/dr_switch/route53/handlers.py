@@ -11,8 +11,8 @@ apigateway の block（スロットリング 0）が担当する。
 Alias レコードは自分で TTL を持たず、ターゲット側の値を使う。
 
 必要な IAM:
-    switch  route53:ChangeResourceRecordSets（対象ホストゾーン）
-            route53:GetChange（"*"。リソースレベル権限に非対応）
+    switch  route53:ListResourceRecordSets / route53:ChangeResourceRecordSets
+            （対象ホストゾーン）
     check   route53:ListResourceRecordSets（対象ホストゾーン）
 
 ハンドラ（成功時は何も返さない。失敗・未収束は例外で表現する）:
@@ -22,6 +22,7 @@ Alias レコードは自分で TTL を持たず、ターゲット側の値を使
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 
@@ -32,11 +33,8 @@ logger = logging.getLogger(__name__)
 
 RECORD_TYPE = "A"
 
-# Alias レコードのヘルスチェック評価。現在の設定を維持する。
-EVALUATE_TARGET_HEALTH = True
-
-# Route 53 はグローバルサービスで、エンドポイントも 1 つしかない。
-# クライアント生成時のリージョン指定は認証に使われるだけで、
+# Route 53 はグローバルサービスで、API エンドポイントは us-east-1 の 1 つだけ
+#（公式に「北京・寧夏以外のリージョンでは us-east-1 を指定する」と明記）。
 # 東京・大阪どちらから呼んでも同じホストゾーンを操作できる。
 ROUTE53_REGION = "us-east-1"
 
@@ -49,12 +47,12 @@ def _normalize(name: str) -> str:
     return name if name.endswith(".") else f"{name}."
 
 
-def _current_alias(r53, cfg) -> dict | None:
-    """対象レコードの現在の AliasTarget を返す。無ければ None.
+def _current_record(r53, cfg) -> dict | None:
+    """対象のレコードセット全体を返す。無ければ None.
 
     aws route53 list-resource-record-sets --hosted-zone-id <id>
-      --query "ResourceRecordSets[?Name=='<name>' && Type=='A']"
-      の AliasTarget
+      --start-record-name <name> --start-record-type A --max-items 1
+      の ResourceRecordSets[0]
 
     StartRecordName / StartRecordType で対象から探し始めるので、
     ゾーンに多数のレコードがあっても 1 ページで足りる。
@@ -68,8 +66,21 @@ def _current_alias(r53, cfg) -> dict | None:
     )
     for record in response["ResourceRecordSets"]:
         if record["Name"] == wanted and record["Type"] == RECORD_TYPE:
-            return record.get("AliasTarget")
+            return record
     return None
+
+
+def _same_target(record: dict, dns_name: str) -> bool:
+    """現在の向き先が指定と一致するか。末尾ドットと大文字小文字を無視する。"""
+    current = record.get("AliasTarget", {}).get("DNSName", "")
+    return current.rstrip(".").lower() == dns_name.rstrip(".").lower()
+
+
+def _missing_record_error(cfg) -> NotRecoverableError:
+    return NotRecoverableError(json.dumps(
+        {"route53": {_normalize(cfg.record_name): {
+            "reason": "record does not exist"}}},
+        ensure_ascii=False))
 
 
 @lambda_handler("route53-switch", Route53SwitchConfig)
@@ -77,50 +88,54 @@ def switch(cfg: Route53SwitchConfig, event: dict, *, dry_run: bool,
            context) -> dict:
     """Alias レコードの向き先を切替先の VPC エンドポイントへ変える.
 
-    UPSERT なのでレコードが無ければ作られる。ただし本来は存在するはずで、
-    無い状態は設定漏れなので check 側で検出する。
+    **読み取ったレコードセットをそのまま使い、AliasTarget の DNSName と
+    HostedZoneId だけを差し替える。** UPSERT はレコードセット全体を置き換える
+    ため、こちらで組み立て直すと EvaluateTargetHealth やルーティングポリシー
+    （Weight / Failover / HealthCheckId など）を意図せず上書きしてしまう。
+
+    レコードが無い状態は設定漏れで、待っても現れない。UPSERT は作成もできて
+    しまうので、事前に弾く。
 
     伝播（GetChange が INSYNC になること）は待たない。待つと Lambda の
     タイムアウトに縛られるため、収束は check が確認する。
     """
     r53 = client("route53", ROUTE53_REGION)
-    wanted = _normalize(cfg.record_name)
-    current = _current_alias(r53, cfg)
+    record = _current_record(r53, cfg)
 
-    if current and current["DNSName"].rstrip(".").lower() == \
-            cfg.alias_dns_name.rstrip(".").lower():
+    if record is None:
+        raise _missing_record_error(cfg)
+
+    if _same_target(record, cfg.alias_dns_name):
         logger.info("route53: already pointing at %s", cfg.alias_dns_name)
         return {}
 
     if dry_run:
         logger.info("route53: would point %s to %s (current: %s)",
-                    wanted, cfg.alias_dns_name,
-                    current["DNSName"] if current else "none")
+                    record["Name"], cfg.alias_dns_name,
+                    record["AliasTarget"]["DNSName"])
         return {}
+
+    # 向き先だけを差し替える。他のフィールドは読み取ったまま渡す。
+    updated = copy.deepcopy(record)
+    updated["AliasTarget"]["DNSName"] = cfg.alias_dns_name
+    updated["AliasTarget"]["HostedZoneId"] = cfg.alias_hosted_zone_id
 
     # aws route53 change-resource-record-sets --hosted-zone-id <id>
     #   --change-batch '{"Changes": [{"Action": "UPSERT", ...}]}'
     #   の ChangeInfo.Id
+    #
+    # ChangeAction は CREATE / DELETE / UPSERT の 3 つだけで、既存レコードの
+    # 値を変える手段は UPSERT のみ（API モデルで確認済み）。
     response = r53.change_resource_record_sets(
         HostedZoneId=cfg.hosted_zone_id,
         ChangeBatch={
             "Comment": "DR switch",
-            "Changes": [{
-                "Action": "UPSERT",
-                "ResourceRecordSet": {
-                    "Name": wanted,
-                    "Type": RECORD_TYPE,
-                    "AliasTarget": {
-                        "HostedZoneId": cfg.alias_hosted_zone_id,
-                        "DNSName": cfg.alias_dns_name,
-                        "EvaluateTargetHealth": EVALUATE_TARGET_HEALTH,
-                    },
-                },
-            }],
+            "Changes": [{"Action": "UPSERT", "ResourceRecordSet": updated}],
         },
     )
     logger.info("route53: %s -> %s (change=%s)",
-                wanted, cfg.alias_dns_name, response["ChangeInfo"]["Id"])
+                record["Name"], cfg.alias_dns_name,
+                response["ChangeInfo"]["Id"])
     return {}
 
 
@@ -132,21 +147,14 @@ def check(cfg: Route53CheckConfig, event: dict, *, dry_run: bool,
     Route 53 のレコードは change_resource_record_sets の直後から
     list_resource_record_sets に反映される。反映されていない状態は
     伝播待ちなので RetryableError。
-
-    レコードそのものが存在しない場合は設定漏れで、待っても現れない。
     """
     r53 = client("route53", ROUTE53_REGION)
-    current = _current_alias(r53, cfg)
+    record = _current_record(r53, cfg)
 
-    if current is None:
-        raise NotRecoverableError(json.dumps(
-            {"route53": {_normalize(cfg.record_name): {
-                "reason": "record does not exist"}}},
-            ensure_ascii=False))
+    if record is None:
+        raise _missing_record_error(cfg)
 
-    actual = current["DNSName"].rstrip(".").lower()
-    expected = cfg.alias_dns_name.rstrip(".").lower()
-    if actual != expected:
-        return {"alias_dns_name": current["DNSName"],
+    if not _same_target(record, cfg.alias_dns_name):
+        return {"alias_dns_name": record["AliasTarget"]["DNSName"],
                 "expected": cfg.alias_dns_name}
     return {}
