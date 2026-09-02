@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ssm:ap-northeast-1::document/AWS-RunShellScript",
+        "arn:aws:ssm:ap-northeast-1:075096050465:managed-instance/mi-*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"],
+      "Resource": "*"
+    }
+  ]
+}

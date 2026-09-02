@@ -1,0 +1,88 @@
+{
+  "Comment": "Run commands on on-prem server via SSM Run Command",
+  "StartAt": "SendCommand",
+  "TimeoutSeconds": 7200,
+  "States": {
+    "SendCommand": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+      "Parameters": {
+        "DocumentName": "AWS-RunShellScript",
+        "Targets": [
+          { "Key": "InstanceIds", "Values": ["mi-0c40127a4ea3076be"] }
+        ],
+        "Parameters": {
+          "commands": [
+            "set -euo pipefail",
+            "cd /opt/app",
+            "./do_something.sh"
+          ],
+          "executionTimeout": ["3600"]
+        },
+        "TimeoutSeconds": 600
+      },
+      "ResultSelector": { "CommandId.$": "$.Command.CommandId" },
+      "ResultPath": "$.ssm",
+      "Next": "Wait"
+    },
+
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "GetResult"
+    },
+
+    "GetResult": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ssm:getCommandInvocation",
+      "Parameters": {
+        "CommandId.$": "$.ssm.CommandId",
+        "InstanceId": "mi-0c40127a4ea3076be"
+      },
+      "ResultSelector": {
+        "Status.$": "$.Status",
+        "ResponseCode.$": "$.ResponseCode",
+        "Output.$": "$.StandardOutputContent",
+        "Error.$": "$.StandardErrorContent"
+      },
+      "ResultPath": "$.result",
+      "Retry": [
+        {
+          "ErrorEquals": ["Ssm.InvocationDoesNotExistException"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 5,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "CheckStatus"
+    },
+
+    "CheckStatus": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.result.Status",
+          "StringEquals": "Success",
+          "Next": "Done"
+        },
+        {
+          "Or": [
+            { "Variable": "$.result.Status", "StringEquals": "Pending" },
+            { "Variable": "$.result.Status", "StringEquals": "InProgress" },
+            { "Variable": "$.result.Status", "StringEquals": "Delayed" }
+          ],
+          "Next": "Wait"
+        }
+      ],
+      "Default": "CommandFailed"
+    },
+
+    "Done": { "Type": "Succeed" },
+
+    "CommandFailed": {
+      "Type": "Fail",
+      "Error": "SsmCommandFailed",
+      "Cause": "Run Command did not succeed. See execution history for stdout/stderr."
+    }
+  }
+}
